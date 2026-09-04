@@ -1,0 +1,30 @@
+{
+  "name": "obsidian-memory-plugin",
+  "version": "0.3.2",
+  "private": true,
+  "description": "The Obsidian Memory skill packaged for OpenClaw and Codex.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": { "node": ">=22.22.3" },
+  "files": [
+    "index.js",
+    "lib",
+    "skills",
+    "scripts",
+    "openclaw.plugin.json",
+    ".codex-plugin",
+    "README.md",
+    "SOURCES.md",
+    "examples"
+  ],
+  "openclaw": {
+    "extensions": ["./index.js"],
+    "runtimeExtensions": ["./index.js"]
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "check": "node --check index.js && node --check lib/config.js && node --check lib/prompt.js",
+    "check:codex": "node scripts/validate-codex-plugin.mjs",
+    "prepack": "npm run check && npm run check:codex && npm test"
+  }
+}

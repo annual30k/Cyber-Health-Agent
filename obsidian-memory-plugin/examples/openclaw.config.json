@@ -1,0 +1,18 @@
+{
+  "plugins": {
+    "entries": {
+      "obsidian-memory-plugin": {
+        "enabled": true,
+        "hooks": {
+          "allowConversationAccess": true,
+          "allowPromptInjection": true
+        },
+        "config": {
+          "agentId": "main",
+          "vault": "My Vault",
+          "vaultPath": "/absolute/path/to/My Vault"
+        }
+      }
+    }
+  }
+}
