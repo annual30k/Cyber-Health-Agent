@@ -20,7 +20,7 @@ Cyber Health Core：事务、规则、修订、审计
 SQLite（唯一实时事实源） + MemoryProvider（可降级的长期记忆）
 ```
 
-P0 不包含云同步、多用户、多宿主同时写入、远程 HTTP 发布、医疗诊断或将原始图片落盘。
+P0 不包含云同步、多用户、多宿主同时写入、远程 HTTP 发布或医疗诊断。扩展的 `cyber_health_log_workout` 可将用户主动提交的健康截图与其结构化分析一并写入本地事实库，供后续会话核对。
 
 ## 2. 会话与状态恢复
 
@@ -28,7 +28,7 @@ P0 不包含云同步、多用户、多宿主同时写入、远程 HTTP 发布�
 
 | 阶段 | OpenClaw 行为 | Cyber Health 约束 |
 | --- | --- | --- |
-| 会话开始 | 调用 `cyber_health_get_profile` | 返回用户目标、限制和 `state_version` |
+| 会话开始 | 调用 `cyber_health_get_profile` | 返回用户目标、限制、首次建档问题和 `state_version`；资料未全时主动询问 |
 | 获取当日状态 | 调用 `cyber_health_get_today` | 从 SQLite 读取已提交事实，不依赖聊天历史 |
 | 修改前确认 | 将当前 `state_version` 带入写工具 | 不匹配时返回 `CONFLICT_VERSION` |
 | 写入失败后重试 | 复用相同 `idempotency_key` | 返回原操作结果，不产生重复账目 |
@@ -42,6 +42,7 @@ P0 只注册以下工具；工具名称、字段和错误码是跨宿主 Core Co
 | 工具 | 类型 | 必填输入 | 成功输出 | 失败 / 限制 |
 | --- | --- | --- | --- | --- |
 | `cyber_health_get_profile` | 读 | `user_id` | `profile`, `state_version` | 不创建健康事实 |
+| `cyber_health_update_profile` | 写 | `user_id`, `idempotency_key` | 更新后的档案与 onboarding 状态 | 不猜测用户未回答的信息 |
 | `cyber_health_get_today` | 读 | `user_id`, `date` | `nutrition`, `plan_status`, `state_version` | 只返回已提交状态 |
 | `cyber_health_log_meal` | 写 | `user_id`, `occurred_at`, `meal_type`, `foods`, `kcal_range`, `idempotency_key` | `operation_id`, `meal_id`, `today_totals`, `state_version` | 区间非法、幂等键冲突、版本冲突 |
 | `cyber_health_get_audit_trail` | 读 | `user_id` | 修订链、版本前后值、因果 ID | 不显示原图或模型推理 |
@@ -88,7 +89,7 @@ openclaw mcp add cyber-health \
   --arg cyber_health_mcp \
   --cwd /absolute/path/to/Cyber-Health-Agent \
   --env CYBER_HEALTH_DB=/absolute/path/to/cyber-health.sqlite3 \
-  --include 'cyber_health_get_profile,cyber_health_get_today,cyber_health_log_meal,cyber_health_get_audit_trail,cyber_health_health_check,cyber_health_get_schedule'
+  --include 'cyber_health_get_profile,cyber_health_update_profile,cyber_health_get_today,cyber_health_log_meal,cyber_health_get_audit_trail,cyber_health_health_check,cyber_health_get_schedule'
 
 openclaw mcp doctor cyber-health --probe
 openclaw mcp tools cyber-health --include 'cyber_health_get_*,cyber_health_log_meal'
@@ -115,9 +116,11 @@ MCP 服务不主动推送消息。`cyber_health_get_schedule` 只返回事件与
 
 任何补偿动作都必须重新调用当前状态工具，绝不能用创建定时器时缓存的计划文本。
 
+建档响应包含稳定的 `daily_review_automation.declaration_key`。OpenClaw 应以该键幂等维护一条 `health-manager` 每日晚间任务；任务先读取 `daily_review_readiness` 并补问未核实的餐食、训练或休息事实，确认后才调用 `daily_review` 生成热量/蛋白目标缺口、训练总结与次日详细训练预案。
+
 ## 8. 验收清单
 
-1. `openclaw mcp doctor cyber-health --probe` 成功并发现恰好六个 P0 工具。
+1. `openclaw mcp doctor cyber-health --probe` 成功并发现恰好七个 P0 工具（包含首次建档写入）。
 2. 新建两个独立 OpenClaw 会话：会话 A 记录餐食；会话 B 读取同一天数据，余额和 `state_version` 一致。
 3. 在 OpenClaw 重发同一工具调用（同一 `idempotency_key`），数据库中仍只有一条 active 餐食和一条 operation log。
 4. 让两个会话基于相同旧版本修改同一餐：第一个成功，第二个收到 `CONFLICT_VERSION`，没有静默覆盖。

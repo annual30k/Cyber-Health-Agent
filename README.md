@@ -1,0 +1,195 @@
+# Cyber Health Agent (Core & stdio MCP v0.2.4)
+
+> Pluggable deterministic health engine and stdio MCP server for AI hosts (OpenClaw, Hermes, etc.).
+> **Current Status**: Core P0 implementation and extended domain capabilities (26 tools total: 7 P0 + 19 extended), including first-run intake, nightly fact collection, target-gap analysis, host automation declarations, next-day plan generation, and cross-session wearable screenshot retention.
+
+---
+
+## Architecture Overview
+
+```text
+[User Dialogue / Photo Food Description]
+                  ↓
+[AI Host: OpenClaw / Hermes]  (Natural language comprehension & vision)
+                  ↓ stdio MCP protocol
+[Cyber Health MCP Adapter]    (cyber_health_mcp: FastMCP, JSON schema validation, sanitized envelope)
+                  ↓
+[Cyber Health Domain Core]    (cyber_health: Transactions, safety invariants, revisions, lease state machine)
+        ┌─────────┴────────────────────────┐
+        ↓                                  ↓
+[SQLite Fact Store] (WAL, single fact source)  [MemoryProvider] (Outbox queue / Obsidian)
+```
+
+- **Host-Neutral & Headless**: AI hosts do not own health state. Health records are stored in SQLite facts tables with optimistic concurrency (`state_version`).
+- **Strict Read-Only Purity & Consistent Snapshots**: `cyber_health_get_profile` and `cyber_health_get_today` are strictly pure snapshot queries and never insert or mutate database records. `get_today` uses explicit snapshot read transactions (`BEGIN` ... `COMMIT`).
+- **Idempotency & Concurrency**: All state-mutating operations strictly require a non-empty `idempotency_key`. Replays return cached responses; payload mismatches raise `IDEMPOTENCY_MISMATCH`. Stale writes raise `CONFLICT_VERSION`.
+- **Timezone Awareness & Real DST Calculations**: Meal times and daily records are converted to the user's timezone (`Asia/Shanghai` default) using standard IANA `zoneinfo`. Daily reminders calculate true local offsets dynamically (e.g. America/New_York `-04:00` / `-05:00`).
+- **Missing Data Distinction**: Days without entries are explicitly marked `data_status: "unrecorded"` and `missing_data: true`, distinguishing lack of data from fasting or zero intake. Unconfigured calorie/protein targets return `None` with `status: "unconfigured"`.
+- **Cross-Session Screenshot Recall**: `cyber_health_log_workout` persists the user-confirmed structured result of a wearable screenshot (duration, distance, active/total calories, average heart rate, pace, exertion) and can retain its original PNG/JPEG/WebP bytes. The image and its SHA-256 are attached to the same workout fact and included in `export_data`; observed exercise calories are never used to silently increase a food-calorie target.
+- **Centralized Safety Decision Engine**: A unified evaluation engine (`SafetyRecoveryEvaluation`) enforces strict safety hierarchy across plan generation, prescription, progression suggestion, and progression confirmation:
+  1. `SAFETY_RESTRICTED`: Acute red flags (chest pain, syncope, dyspnea) block all workouts and prescribe emergency triage.
+  2. `RECOVERY_FLAG_CLEAR_01`: Mandatory 7-day protective deload ($\le 50-60\%$ load, RIR $\ge 3$) after medical clearance.
+  3. `TRAIN_RECOVERY_01`: Sleep $< 6.0$h, fatigue $\ge 7$, or recovery score $< 60$ triggers $20-30\%$ volume reduction. Incremental metric submissions merge with previous daily state, preserving prior sleep facts.
+  4. `TRAIN_PROGRESSION_STANDARD`: Double progression state machine requiring 2 consecutive sessions at top rep bracket with RPE $\le 8$, load comparability, and proposal signature verification.
+- **Concurrency-Safe Outbox State Machine**:
+  - **Collision-Free Intent IDs**: Uses canonical tuple JSON SHA-256 (`sha256(json.dumps([user_id, idempotency_key]))`) eliminating separator collisions.
+  - **Phase 1 Pre-Reservation**: Persists `operation_log` and `memory_outbox` (`in_flight`) in an atomic transaction before any external IO.
+  - **Work-Generation Continuation Keys**: Dynamically hashes the current 50-task batch (`intent_id:attempts:status`) into `maint_{user_id}_{day}_g{hash}`, allowing 51+ task queues and retry backoffs to advance without idempotency blockage.
+  - **Lineage-Preserving TTL Pruning**: Safely prunes unreferenced superseded records while preserving parent records and immutable audit logs.
+- **Fact Migration & Integrity**: Full safety profiles, revision chains, and schedules are exported and restored idempotently. Duplicate IDs with conflicting data raise `ConflictError` rather than being silently ignored.
+- **Evidence-Based Knowledge Retrieval**: Only verified primary literature citations (ISSN, AHA) with valid DOIs/URLs are returned; queries without verified matches return `unavailable` without returning irrelevant items.
+
+---
+
+## Minimal Installation & Execution
+
+The project uses Python 3.12 managed via `uv`:
+
+```bash
+# 1. Sync dependencies into local .venv
+uv sync --python 3.12
+
+# 2. Run standard P0 stdio server (7 P0 tools, including profile onboarding)
+.venv/bin/cyber-health-mcp --db ./data/cyber-health.sqlite3
+
+# 3. Run extended server exposing all 26 verified domain tools
+.venv/bin/cyber-health-mcp --db ./data/cyber-health.sqlite3 --allow-all
+
+# 4. Dry-run host integration inspection & uninstallation report
+.venv/bin/cyber-health-uninstall --dry-run
+
+# 5. Production-safe uninstallation (unregisters owned host integration; preserves all data)
+.venv/bin/cyber-health-uninstall
+```
+
+Alternatively, invoke via Python module:
+```bash
+.venv/bin/python -m cyber_health_mcp --db ./data/cyber-health.sqlite3 [--allow-all]
+.venv/bin/python -m cyber_health.uninstall [--dry-run]
+```
+
+### CLI Arguments & Environment Variables
+
+#### Cyber Health MCP Server (`cyber-health-mcp`)
+| Parameter / Flag | Environment Variable | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `--db <path>` | `CYBER_HEALTH_DB` | `./data/cyber-health.sqlite3` | Path to SQLite database file |
+| `--allow-all` | `CYBER_HEALTH_ALLOW_ALL_TOOLS` | `false` | When true, exposes all 19 extended domain tools (26 tools total); defaults to 7 P0 tools |
+
+#### Cyber Health Uninstaller (`cyber-health-uninstall`)
+| Parameter / Flag | Default | Description |
+| :--- | :--- | :--- |
+| `--dry-run` | `false` | Deterministic inspection and reporting without modifying any host or file state |
+| `--json` | `false` | Output structured machine-readable report in JSON format |
+| `--db <path>` | `./data/cyber-health.sqlite3` | Path to SQLite database file to verify / protect |
+| `--purge-data` | `false` | Opt-in flag to delete data files (requires `--confirm-purge`) |
+| `--confirm-purge <token>` | `None` | Mandatory verification token (`DELETE_CYBER_HEALTH_DATA`) when `--purge-data` is specified |
+| `--force-foreign-host-mcp` | `false` | Recovery-only override to unset OpenClaw MCP server if ownership paths are ambiguous (strictly requires `--confirm-foreign-unset`) |
+| `--confirm-foreign-unset <token>` | `None` | Mandatory recovery token (`UNSET_FOREIGN_CYBER_HEALTH`) required when `--force-foreign-host-mcp` is set |
+
+---
+
+## Tool Surface & Implementation Status
+
+### P0 Core Tools (Default Allowlist - 7 Tools)
+
+| Tool Name | Type | Status | Description |
+| :--- | :--- | :--- | :--- |
+| `cyber_health_get_profile` | Read | **Completed** | Read-only profile query without DB mutation |
+| `cyber_health_update_profile` | Write | **Completed** | First-run intake and later profile/goal updates |
+| `cyber_health_get_today` | Read | **Completed** | Snapshot query for date facts, maintenance recommendation, and generation keys |
+| `cyber_health_log_meal` | Write | **Completed** | Meal logging with revision chain, repeat meal, and idempotency |
+| `cyber_health_get_audit_trail` | Read | **Completed** | Chronological operation logs with before/after versions |
+| `cyber_health_health_check` | Read | **Completed** | SQLite status, MemoryProvider state, pending outbox work |
+| `cyber_health_get_schedule` | Read | **Completed** | Pure derived read returning dynamic eligibility, suppression reasons, and tombstones |
+
+### Extended Domain Tools (Enabled with `--allow-all` - 19 Additional Tools, 26 Total)
+
+| Tool Name | Status | Description |
+| :--- | :--- | :--- |
+| `cyber_health_log_daily_metrics` | **Completed** | Daily metric submissions, merged state, TRAIN_RECOVERY_01 fatigue evaluation |
+| `cyber_health_delete_meal` | **Completed** | Soft deletion of active meal and balance recalculation |
+| `cyber_health_log_workout` | **Completed** | Workout log, wearable/screenshot facts and original-image retention, red-flag detection, restricted mode block |
+| `cyber_health_daily_review` | **Completed** | Nightly audit, unrecorded handling, revision-linked draft plan |
+| `cyber_health_plan_tomorrow` | **Completed** | Centralized safety, draft/committed state transitions |
+| `cyber_health_acknowledge_schedule_event` | **Completed** | Acknowledging, delivering, skipping, or postponing schedule reminders |
+| `cyber_health_maintain_memory` | **Completed** | Out-of-lock outbox drainage, generation key continuation, owner token lease, and lineage-preserving TTL |
+| `cyber_health_get_remaining_calories` | **Completed** | Remaining calorie/protein budget with macro-prioritized next meal recommendation |
+| `cyber_health_get_training_plan` | **Completed** | Evidence-based exercise prescription generator respecting safety rules and recovery state |
+| `cyber_health_complete_workout` | **Completed** | Minimal workout check-in with red-flag detection and progression state update |
+| `cyber_health_confirm_training_progression` | **Completed** | Transaction-isolated progression confirmation with signature digest and re-checked safety gates |
+| `cyber_health_substitute_exercise` | **Completed** | Real-time exercise substitution preserving movement pattern and weekly volume |
+| `cyber_health_query_knowledge` | **Completed** | Peer-reviewed sports nutrition and cardiovascular exercise safety guidelines lookup |
+| `cyber_health_export_data` | **Completed** | Portable SQLite snapshot export with full audit trails and revision chains |
+| `cyber_health_import_data` | **Completed** | Portable health facts snapshot import with strict schema validation and atomic rollback |
+| `cyber_health_memory_action` | **Completed** | Pre-validated memory candidate action with destructive annotations |
+| `cyber_health_schedule_daily_reminders` | **Completed** | Deterministic 5-window reminder generator with postponement protection |
+| `cyber_health_update_schedule_event` | **Completed** | Scheduled event status, delivery, or postponed time window updates |
+| `cyber_health_query_memory` | **Completed** | Dual-layer memory query retrieving short-term SQLite facts and long-term Obsidian memories |
+
+---
+
+## Host Integration & Uninstallation Engine (`cyber-health-uninstall`)
+
+The packaged console entry point `cyber-health-uninstall` cleanly manages host registrations and provides safe uninstallation:
+
+- **Production-Safe Data Preservation**: By default, `cyber-health-uninstall` **strictly preserves** all SQLite databases (`*.sqlite3`, `*-wal`, `*-shm`), exports, `.venv`, distribution wheels, and user data.
+- **Strict Cross-Project Non-Interference**: `obsidian-memory` is a separate cross-project plugin and **not** a Cyber Health component. The uninstaller **never** uninstalls, disables, edits, or deletes `obsidian-memory`, its Codex plugin/marketplace/cache, any Obsidian Vault, or unrelated OpenClaw configurations.
+- **Strict Ownership Verification**: OpenClaw MCP entries (`cyber-health`) are inspected via `openclaw mcp show cyber-health --json`. Removal via `openclaw mcp unset` (never `remove`) is performed only when command, cwd, or database parameters demonstrably point to this repository root. Foreign or ambiguous entries are hard-refused unless the recovery-only override `--force-foreign-host-mcp` is explicitly paired with `--confirm-foreign-unset UNSET_FOREIGN_CYBER_HEALTH`.
+- **Safe LaunchAgent Management**: LaunchAgents are handled only for the fixed project label (`ai.cyber-health.agent`) at `~/Library/LaunchAgents/ai.cyber-health.agent.plist`, and ownership is proven from program/working directory paths. Arbitrary label targeting and pattern deletion are prohibited.
+- **Gated Data Purge (`--purge-data`)**: Opt-in data removal strictly requires the strong confirmation token `--confirm-purge DELETE_CYBER_HEALTH_DATA`. Symlinks, path traversals (`..`), root/home/broad system directories, and out-of-boundary paths are rejected. Approved targets prefer recoverable trash semantics and never inspect or display health contents.
+- **Idempotency & Clean No-Ops**: Unregistered integrations or repeated executions succeed cleanly as no-ops.
+
+---
+
+## Automated Test Suite
+
+Run the full test suite using `unittest`:
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+Current test suite contains **166 automated test cases** across 23 test files (100% passing):
+
+### Part A. Codex Review & Independent Verification Suites (89 tests)
+- `tests/test_codex_review.py` (8 tests): Round 1 regressions (mandatory idempotency keys, calendar validation, range checks, repeat resolution).
+- `tests/test_codex_review_round2.py` (7 tests): Round 2 regressions (console entrypoint, outbox isolation, pre-commit intent, red-flag mode, DST offsets).
+- `tests/test_codex_outbox_concurrency.py` (3 tests): Round 3 concurrency state machine (delimiter collisions, pre-reservation, task stealing prevention).
+- `tests/test_codex_review_round4.py` (4 tests): Round 4 regressions (profile safety restoration, full payload hashing, non-stealing lease re-entrancy, unified sleep < 6h).
+- `tests/test_codex_import_safety.py` (2 tests): Round 5 regressions (safety mode protection on import, normalized field conflict detection).
+- `tests/test_codex_import_validation.py` (4 tests): Round 6 regressions (unsupported schema rejection, malformed JSON rollback, invalid timezone/mode).
+- `tests/test_codex_memory_evidence.py` (2 tests): Round 7 regressions (memory status/confidence fidelity, strict limit truncation).
+- `tests/test_codex_unconfigured_plan.py` (2 tests): Round 8 regressions (unconfigured target disclosure, zero default calories rejection).
+- `tests/test_codex_review_round9.py` (9 tests): Round 9 regressions (double progression state machine, combined constraints, stale evidence expiration, movement substitution).
+- `tests/test_codex_review_round10.py` (14 tests): Round 10 regressions (failed session break streak, same-day consolidation, proposal signature verification, baseline load separation).
+- `tests/test_codex_progression_fatigue.py` (8 tests): Round 11 regressions (shared pure safety evaluation, nested metrics extraction, zero-value fidelity, future date filtering).
+- `tests/test_codex_schedule_sync.py` (8 tests): Round 12 regressions (5 standard reminder windows, postponement preservation, tombstone snapshots, pure-read schedule).
+- `tests/test_codex_review_round13.py` (10 tests): Round 13 regressions (partial workout non-suppression, missing completion rate non-suppression, superseded plan filtering, pure-read snapshot isolation, scoped maintenance host drain).
+- `tests/test_codex_review_round14.py` (8 tests): Round 14 regressions (TTL meal detail detection, expired in-flight worker recovery, 51+ task continuation without idempotency block, provider failure backoff, review/rule decoupling, stdio MCP continuation).
+
+### Part B. Gemini Domain Contract & System Regression Suites (41 tests)
+- `tests/test_p0_contracts.py` (6 tests): P0 contracts (read-only purity, 5-session flow, idempotency hash match vs mismatch, version conflict rejection, timezone-aware day grouping, input validation).
+- `tests/test_domain_advanced.py` (6 tests): Advanced domain logic (meal deletion & repeat, recovery score, red flag lock & deload protocol, review/plan transitions, schedule lifecycle, memory outbox queueing & retry).
+- `tests/test_cross_session.py` (4 tests): Cross-session persistence and optimistic concurrency.
+- `tests/test_mcp_stdio.py` (2 tests): Cross-process stdio MCP client tests verifying tool discovery (7 P0 vs 26 total) and stdio execution without warnings.
+- `tests/test_outbox_concurrency_extended.py` (4 tests): Outbox extensions (concurrent replay, batch chunking at 50, crashed worker lease recovery, physical TTL pruning).
+- `tests/test_domain_remaining.py` (6 tests): Training plan states, workout check-in red flags, knowledge query disclosures, data export/import round-trip, schedule event lifecycle, and MCP error envelope input sanitization.
+- `tests/test_domain_memory_and_trends.py` (13 tests): Dual-layer memory query, remaining calorie guidance, weekly trend aggregation, missing day disclosure, idempotent maintenance, late meal revision chains, detail pruning, and exercise decision matrix.
+
+### Part C. Isolated Host & Uninstallation Safety Suites (30 tests)
+- `tests/test_uninstaller.py` (30 tests): Host integration uninstallation contracts (including packaged-CLI OpenClaw auto-detection, exact-state fingerprints and global preflight, fail-closed execution ordering, deterministic dry-run purity, normal data preservation, sanitized reporting without raw environment leakage, refusal of unrelated/foreign OpenClaw registrations, project-root prefix collision rejection, command signature spoofing rejection, double confirmation token for foreign unsets, CLI inspection error fail-closed handling with secret redaction, explicit `--confirm-purge` token requirement, TOCTOU post-plan symlink/inode/host-state swap defenses, refusal of destructive purge when host inspector is missing, fixed LaunchAgent label enforcement, project-local `.trash` symlink rejection, preservation of unknown files in data directory, idempotent repeat execution, non-interference with `obsidian-memory`, Obsidian Vaults, and Codex state, and isolated live OpenClaw sandbox probe).
+- `tests/test_onboarding_flow.py` (5 tests): First-run grouped intake, automation declaration, nightly missing-fact questions, target-gap/workout analysis, detailed tomorrow plan, read purity, and plan gating.
+
+---
+
+## Truth-in-Advertising & External Boundaries
+
+> [!IMPORTANT]
+> **Declaration of System Status & Physical Boundaries**:
+> The local Cyber Health Core engine, stdio MCP server, and uninstaller have completed automated verification within the v0.2.4 scope. However, **this does not constitute production deployment or physical external integration**:
+> 1. **Obsidian Vault / MemoryProvider: Not Connected in Production**: The system enforces strict isolation and never touches user local Obsidian files without explicit provider authorization. Unconnected environments safely buffer intents in `memory_outbox`.
+> 2. **Cross-Project Plugin Boundaries**: `obsidian-memory` is a separate cross-project plugin and is never modified, disabled, or removed by Cyber Health Agent tools.
+> 3. **Host Active Push Notifications: Not Registered**: Core is a headless request-response MCP server that outputs dynamic trigger conditions, suppression reasons, and tombstones. Active push notifications require a host-level scheduler or daemon (e.g. OpenClaw Cron, Launchd).
+> 4. **Clinical Physician Review: Pending**: Built-in evidence guidelines carry mandatory `NON_DIAGNOSTIC` legal disclaimers. Acute red-flag symptoms immediately block workouts and require emergency offline consultation.
+> 5. **Multimodal Vision & Wearables: Handled by Host**: Food photo analysis and native Apple Health/Garmin Bluetooth syncing are host-level capabilities; Core processes structured numerical facts.

@@ -47,3 +47,19 @@ export function parseConfig(input) {
   }
   return Object.freeze(config);
 }
+
+export function parseConfigs(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new TypeError("Obsidian Memory: config must be an object");
+  }
+  if (!hasOwn(input, "agentConfigs")) {
+    const config = parseConfig(input);
+    return config ? new Map([[config.agentId, config]]) : new Map();
+  }
+  if (Object.keys(input).length !== 1 || !input.agentConfigs || typeof input.agentConfigs !== "object" || Array.isArray(input.agentConfigs)) {
+    throw new TypeError("Obsidian Memory: agentConfigs must be the only config field");
+  }
+  const entries = Object.entries(input.agentConfigs);
+  if (entries.length === 0) throw new TypeError("Obsidian Memory: agentConfigs must not be empty");
+  return new Map(entries.map(([agentId, connection]) => [agentId, parseConfig({ ...connection, agentId })]));
+}

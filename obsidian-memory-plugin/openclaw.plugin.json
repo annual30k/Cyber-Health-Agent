@@ -10,7 +10,8 @@
     "additionalProperties": false,
     "anyOf": [
       { "maxProperties": 0 },
-      { "required": ["agentId", "vaultPath"] }
+      { "required": ["agentId", "vaultPath"] },
+      { "required": ["agentConfigs"] }
     ],
     "properties": {
       "agentId": { "type": "string", "minLength": 1, "maxLength": 128 },
@@ -21,7 +22,21 @@
         "type": "string", "maxLength": 128,
         "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]*$"
       },
-      "projectRoot": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      "projectRoot": { "type": "string", "minLength": 1, "maxLength": 4096 },
+      "agentConfigs": {
+        "type": "object", "minProperties": 1,
+        "additionalProperties": {
+          "type": "object", "additionalProperties": false,
+          "required": ["vaultPath"],
+          "properties": {
+            "vault": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "vaultPath": { "type": "string", "minLength": 1, "maxLength": 4096 },
+            "cliPath": { "type": "string", "minLength": 1, "maxLength": 4096 },
+            "projectId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]*$" },
+            "projectRoot": { "type": "string", "minLength": 1, "maxLength": 4096 }
+          }
+        }
+      }
     }
   },
   "uiHints": {
