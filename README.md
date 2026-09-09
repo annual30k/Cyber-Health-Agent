@@ -1,7 +1,7 @@
-# Cyber Health Agent (Core & stdio MCP v0.2.4)
+# Cyber Health Agent (Core & stdio MCP v0.2.6)
 
 > Pluggable deterministic health engine and stdio MCP server for AI hosts (OpenClaw, Hermes, etc.).
-> **Current Status**: Core P0 implementation and extended domain capabilities (26 tools total: 7 P0 + 19 extended), including first-run intake, nightly fact collection, target-gap analysis, host automation declarations, next-day plan generation, and cross-session wearable screenshot retention.
+> **Current Status**: Core P0 implementation and extended domain capabilities (27 tools total: 7 P0 + 20 extended), including first-run intake, nightly fact collection, target-gap analysis, host automation declarations, next-day plan generation, cross-session wearable screenshot retention, and read-only active-memory pattern suggestions.
 
 ---
 
@@ -26,6 +26,7 @@
 - **Timezone Awareness & Real DST Calculations**: Meal times and daily records are converted to the user's timezone (`Asia/Shanghai` default) using standard IANA `zoneinfo`. Daily reminders calculate true local offsets dynamically (e.g. America/New_York `-04:00` / `-05:00`).
 - **Missing Data Distinction**: Days without entries are explicitly marked `data_status: "unrecorded"` and `missing_data: true`, distinguishing lack of data from fasting or zero intake. Unconfigured calorie/protein targets return `None` with `status: "unconfigured"`.
 - **Cross-Session Screenshot Recall**: `cyber_health_log_workout` persists the user-confirmed structured result of a wearable screenshot (duration, distance, active/total calories, average heart rate, pace, exertion) and can retain its original PNG/JPEG/WebP bytes. The image and its SHA-256 are attached to the same workout fact and included in `export_data`; observed exercise calories are never used to silently increase a food-calorie target.
+- **OpenClaw Memory Boundary**: `obsidian-memory-plugin` is a separate **hook-only** host extension. It loads the Obsidian Memory Skill, prompt hooks, and configuration, but is not an MCP server, database, or callable MemoryProvider. Cyber Health's `ObsidianMemoryProvider` is the adapter layer: after validating the configured `health-manager` Vault/project boundary, it connects Core memory intents and queries to `Vault/20-Projects/<projectId>`.
 - **Centralized Safety Decision Engine**: A unified evaluation engine (`SafetyRecoveryEvaluation`) enforces strict safety hierarchy across plan generation, prescription, progression suggestion, and progression confirmation:
   1. `SAFETY_RESTRICTED`: Acute red flags (chest pain, syncope, dyspnea) block all workouts and prescribe emergency triage.
   2. `RECOVERY_FLAG_CLEAR_01`: Mandatory 7-day protective deload ($\le 50-60\%$ load, RIR $\ge 3$) after medical clearance.
@@ -41,9 +42,34 @@
 
 ---
 
-## Minimal Installation & Execution
+## Standard Installation Contract (for Agents and Users)
 
-The project uses Python 3.12 managed via `uv`:
+When installing Cyber Health for OpenClaw, the required installation entry point is
+`cyber-health install`. Agents must not replace this with only `pip install`, `uv sync`,
+or a hand-written `openclaw mcp add` command, because those paths do not run the
+health-manager long-term-memory preflight.
+
+Run the read-only preflight first, then apply the installation:
+
+```bash
+.venv/bin/cyber-health install --dry-run --json
+.venv/bin/cyber-health install
+```
+
+The install report contains `memory.state` and `memory.warnings`. Continue with the
+SQLite installation when the state is `unconfigured`, but explicitly tell the user what
+must be configured before claiming long-term memory is connected. Only `memory.state:
+connected` authorizes the installer to add the Obsidian Provider arguments to the
+`cyber-health` MCP registration. The same rule applies to `cyber-health update`.
+
+Direct `cyber-health-mcp` launches and manual MCP registration are development or
+diagnostic paths only; they do not replace the standard install/update workflow.
+
+## Development-only Direct Execution
+
+The project uses Python 3.12 managed via `uv`. These direct commands are for local
+development or diagnostics; they do not perform the OpenClaw/health-manager preflight.
+For an OpenClaw installation, follow [Standard Installation Contract](#standard-installation-contract-for-agents-and-users).
 
 ```bash
 # 1. Sync dependencies into local .venv
@@ -52,7 +78,7 @@ uv sync --python 3.12
 # 2. Run standard P0 stdio server (7 P0 tools, including profile onboarding)
 .venv/bin/cyber-health-mcp --db ./data/cyber-health.sqlite3
 
-# 3. Run extended server exposing all 26 verified domain tools
+# 3. Run extended server exposing all 27 verified domain tools
 .venv/bin/cyber-health-mcp --db ./data/cyber-health.sqlite3 --allow-all
 
 # 4. Dry-run host integration inspection & uninstallation report
@@ -68,13 +94,85 @@ Alternatively, invoke via Python module:
 .venv/bin/python -m cyber_health.uninstall [--dry-run]
 ```
 
+The production-safe management CLI is the only supported production entry point for the
+install/update workflow. Its report includes the OpenClaw and `health-manager` memory preflight
+described below:
+
+```bash
+# Inspect without mutating the installation or host configuration
+.venv/bin/cyber-health install --dry-run --json
+.venv/bin/cyber-health update --dry-run --json
+
+# Apply the install or update; if memory.state is unconfigured, show the warning and remediation
+# to the user instead of claiming the long-term-memory bridge is active.
+.venv/bin/cyber-health install
+.venv/bin/cyber-health update
+```
+
+### OpenClaw / Obsidian Memory preflight
+
+Every Cyber Health install or update must inspect the OpenClaw configuration for the separate
+`obsidian-memory-plugin` and the `health-manager` agent's Vault/project connection. The preferred
+multi-agent configuration is:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "obsidian-memory-plugin": {
+        "enabled": true,
+        "config": {
+          "agentConfigs": {
+            "health-manager": {
+              "agentId": "health-manager",
+              "vaultPath": "/absolute/path/to/My Vault",
+              "projectId": "cyber-health-agent",
+              "projectRoot": "/absolute/path/to/Cyber Health Agent"
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+The preflight must verify that the plugin is enabled and loaded; `vaultPath` is an absolute,
+readable Vault without symlinks; `Vault/20-Projects/<projectId>` exists inside that Vault and is
+readable without symlinks; and `Vault/00-System/projects.yaml` declares the same `projectId`.
+Missing or invalid configuration must produce an explicit warning identifying the failed boundary
+(for example, plugin missing/disabled, no `health-manager` config, unreadable Vault, or missing
+project declaration). It must never be reported as a connected Provider. Core SQLite facts can
+continue with long-term memory deferred, in which case the normal outbox and `MEMORY_DEFERRED`
+warning remain authoritative.
+
+When every check passes, the `cyber-health` MCP registration must pass the validated connection to
+Cyber Health:
+
+```text
+--memory-provider obsidian
+--memory-vault /absolute/path/to/My Vault
+--memory-project-id cyber-health-agent
+```
+
+This wires the Provider to the existing `health-manager` project; it does not install or modify the
+plugin or Vault. The plugin remains hook-only, while `ObsidianMemoryProvider` is the Cyber Health
+adapter that owns the filesystem boundary and preserves the Core outbox fallback. See the full
+[OpenClaw adapter specification](docs/openclaw-adapter-spec.md) for the install/update checklist.
+
+If the preflight reports `unconfigured` or `invalid`, the Agent must give the user the
+next configuration action (install/enable `obsidian-memory-plugin`, configure the
+`health-manager` agent's `vaultPath` and `projectId`, or repair the Vault project
+layout) and must not silently proceed as if long-term memory were available. The
+installer does not modify another user's plugin configuration or Vault automatically.
+
 ### CLI Arguments & Environment Variables
 
 #### Cyber Health MCP Server (`cyber-health-mcp`)
 | Parameter / Flag | Environment Variable | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `--db <path>` | `CYBER_HEALTH_DB` | `./data/cyber-health.sqlite3` | Path to SQLite database file |
-| `--allow-all` | `CYBER_HEALTH_ALLOW_ALL_TOOLS` | `false` | When true, exposes all 19 extended domain tools (26 tools total); defaults to 7 P0 tools |
+| `--allow-all` | `CYBER_HEALTH_ALLOW_ALL_TOOLS` | `false` | When true, exposes all 20 extended domain tools (27 tools total); defaults to 7 P0 tools |
 
 #### Cyber Health Uninstaller (`cyber-health-uninstall`)
 | Parameter / Flag | Default | Description |
@@ -103,7 +201,7 @@ Alternatively, invoke via Python module:
 | `cyber_health_health_check` | Read | **Completed** | SQLite status, MemoryProvider state, pending outbox work |
 | `cyber_health_get_schedule` | Read | **Completed** | Pure derived read returning dynamic eligibility, suppression reasons, and tombstones |
 
-### Extended Domain Tools (Enabled with `--allow-all` - 19 Additional Tools, 26 Total)
+### Extended Domain Tools (Enabled with `--allow-all` - 20 Additional Tools, 27 Total)
 
 | Tool Name | Status | Description |
 | :--- | :--- | :--- |
@@ -126,6 +224,7 @@ Alternatively, invoke via Python module:
 | `cyber_health_schedule_daily_reminders` | **Completed** | Deterministic 5-window reminder generator with postponement protection |
 | `cyber_health_update_schedule_event` | **Completed** | Scheduled event status, delivery, or postponed time window updates |
 | `cyber_health_query_memory` | **Completed** | Dual-layer memory query retrieving short-term SQLite facts and long-term Obsidian memories |
+| `cyber_health_get_memory_suggestions` | **Completed** | Read-only multi-day pattern detection that returns user-confirmation candidates without writing memory |
 
 ---
 
@@ -150,7 +249,7 @@ Run the full test suite using `unittest`:
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-Current test suite contains **166 automated test cases** across 23 test files (100% passing):
+Current test suite contains **223 automated test cases** across 28 test files (100% passing), including active-memory suggestion, provider bridge, installer, and updater coverage:
 
 ### Part A. Codex Review & Independent Verification Suites (89 tests)
 - `tests/test_codex_review.py` (8 tests): Round 1 regressions (mandatory idempotency keys, calendar validation, range checks, repeat resolution).
@@ -172,7 +271,7 @@ Current test suite contains **166 automated test cases** across 23 test files (1
 - `tests/test_p0_contracts.py` (6 tests): P0 contracts (read-only purity, 5-session flow, idempotency hash match vs mismatch, version conflict rejection, timezone-aware day grouping, input validation).
 - `tests/test_domain_advanced.py` (6 tests): Advanced domain logic (meal deletion & repeat, recovery score, red flag lock & deload protocol, review/plan transitions, schedule lifecycle, memory outbox queueing & retry).
 - `tests/test_cross_session.py` (4 tests): Cross-session persistence and optimistic concurrency.
-- `tests/test_mcp_stdio.py` (2 tests): Cross-process stdio MCP client tests verifying tool discovery (7 P0 vs 26 total) and stdio execution without warnings.
+- `tests/test_mcp_stdio.py` (2 tests): Cross-process stdio MCP client tests verifying tool discovery (7 P0 vs 27 total) and stdio execution without warnings.
 - `tests/test_outbox_concurrency_extended.py` (4 tests): Outbox extensions (concurrent replay, batch chunking at 50, crashed worker lease recovery, physical TTL pruning).
 - `tests/test_domain_remaining.py` (6 tests): Training plan states, workout check-in red flags, knowledge query disclosures, data export/import round-trip, schedule event lifecycle, and MCP error envelope input sanitization.
 - `tests/test_domain_memory_and_trends.py` (13 tests): Dual-layer memory query, remaining calorie guidance, weekly trend aggregation, missing day disclosure, idempotent maintenance, late meal revision chains, detail pruning, and exercise decision matrix.
@@ -187,8 +286,8 @@ Current test suite contains **166 automated test cases** across 23 test files (1
 
 > [!IMPORTANT]
 > **Declaration of System Status & Physical Boundaries**:
-> The local Cyber Health Core engine, stdio MCP server, and uninstaller have completed automated verification within the v0.2.4 scope. However, **this does not constitute production deployment or physical external integration**:
-> 1. **Obsidian Vault / MemoryProvider: Not Connected in Production**: The system enforces strict isolation and never touches user local Obsidian files without explicit provider authorization. Unconnected environments safely buffer intents in `memory_outbox`.
+> The local Cyber Health Core engine, stdio MCP server, and uninstaller have completed automated verification within the v0.2.6 scope. However, **this does not constitute production deployment or physical external integration**:
+> 1. **Obsidian Vault / MemoryProvider: Conditional connection only**: If the install/update preflight is incomplete, or the Provider is unavailable, Cyber Health does not connect to the Vault and keeps long-term memory in deferred/outbox processing (`MEMORY_DEFERRED`). When the preflight passes and the `cyber-health` MCP registration includes the validated `--memory-provider obsidian`, `--memory-vault`, and `--memory-project-id` parameters, Cyber Health can connect to the verified `health-manager` project. No connection is implicit, and explicit provider authorization remains required.
 > 2. **Cross-Project Plugin Boundaries**: `obsidian-memory` is a separate cross-project plugin and is never modified, disabled, or removed by Cyber Health Agent tools.
 > 3. **Host Active Push Notifications: Not Registered**: Core is a headless request-response MCP server that outputs dynamic trigger conditions, suppression reasons, and tombstones. Active push notifications require a host-level scheduler or daemon (e.g. OpenClaw Cron, Launchd).
 > 4. **Clinical Physician Review: Pending**: Built-in evidence guidelines carry mandatory `NON_DIAGNOSTIC` legal disclaimers. Acute red-flag symptoms immediately block workouts and require emergency offline consultation.

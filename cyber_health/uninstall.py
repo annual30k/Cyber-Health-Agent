@@ -96,8 +96,8 @@ def verify_cyber_health_command_signature(command: str | None, args: list[str] |
     """Verifies recognized command signature for Cyber Health MCP server."""
     if not command:
         return False
-    cmd_name = Path(command).name
-    if cmd_name == "cyber-health-mcp":
+    cmd_name = Path(command).name.lower()
+    if cmd_name in ("cyber-health-mcp", "cyber-health-mcp.exe", "cyber-health-mcp.cmd"):
         return True
     if cmd_name.startswith("python"):
         if args and isinstance(args, list):
@@ -216,6 +216,7 @@ class CyberHealthUninstaller:
         self.dry_run = dry_run
         self.purge_data = purge_data
         self.confirm_purge = confirm_purge
+        self.installed_root = (Path.home() / ".cyber-health").resolve()
 
     def _validate_project_root(self, root: Path) -> None:
         if root in SYSTEM_BROAD_PATHS or root == Path.home():
@@ -354,21 +355,38 @@ class CyberHealthUninstaller:
         if not verify_cyber_health_command_signature(command, args):
             return False
 
+        # Candidate roots: project root and standard installed root
+        candidate_roots = [self.project_root]
+        if hasattr(self, "installed_root") and self.installed_root.exists():
+            candidate_roots.append(self.installed_root)
+
         # 2. At least one exact resolved binding pointing to this installation
         cwd = details.get("cwd")
         if cwd:
             raw_cwd = Path(cwd)
             if not has_symlink_in_path(raw_cwd):
                 res_cwd = raw_cwd.resolve()
-                if res_cwd == self.project_root or self.project_root in res_cwd.parents:
-                    return True
+                for root in candidate_roots:
+                    if res_cwd == root or root in res_cwd.parents:
+                        return True
 
         if command:
             raw_cmd = Path(command)
             if not has_symlink_in_path(raw_cmd):
                 res_cmd = raw_cmd.resolve()
-                if self.project_root in res_cmd.parents:
-                    return True
+                for root in candidate_roots:
+                    if root in res_cmd.parents:
+                        return True
+
+        if args and isinstance(args, list):
+            for i, arg in enumerate(args):
+                if arg == "--db" and i + 1 < len(args):
+                    raw_arg_db = Path(args[i + 1])
+                    if not has_symlink_in_path(raw_arg_db):
+                        res_arg_db = raw_arg_db.resolve()
+                        for root in candidate_roots:
+                            if res_arg_db == self.db_path or root in res_arg_db.parents:
+                                return True
 
         env_vars = details.get("env") or {}
         if isinstance(env_vars, dict):
@@ -377,8 +395,9 @@ class CyberHealthUninstaller:
                 raw_db = Path(db_env)
                 if not has_symlink_in_path(raw_db):
                     res_db = raw_db.resolve()
-                    if res_db == self.db_path or self.project_root in res_db.parents:
-                        return True
+                    for root in candidate_roots:
+                        if res_db == self.db_path or root in res_db.parents:
+                            return True
 
         return False
 

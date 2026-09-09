@@ -4,13 +4,16 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cyber-health-agent"
-version = "0.2.4"
+version = "0.2.6"
 description = "Local-first, host-neutral health facts and MCP tools"
 requires-python = ">=3.11"
 dependencies = ["mcp>=1.26,<2", "pydantic>=2.11,<3"]
 
 [project.scripts]
+cyber-health = "cyber_health.cli:main"
 cyber-health-mcp = "cyber_health_mcp:main"
+cyber-health-install = "cyber_health.install:main"
+cyber-health-update = "cyber_health.update:main"
 cyber-health-uninstall = "cyber_health.uninstall:main"
 
 [tool.hatch.build.targets.wheel]

@@ -1,6 +1,6 @@
 """Cyber Health domain core."""
 
-__version__ = "0.2.4"
+__version__ = "0.2.6"
 
 from .errors import (
     ConflictError,
@@ -19,12 +19,22 @@ def __getattr__(name: str):
         from .uninstall import CyberHealthUninstaller
 
         return CyberHealthUninstaller
+    if name == "CyberHealthInstaller":
+        from .install import CyberHealthInstaller
+
+        return CyberHealthInstaller
+    if name == "CyberHealthUpdater":
+        from .update import CyberHealthUpdater
+
+        return CyberHealthUpdater
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [
     "CyberHealthError",
     "CyberHealthService",
+    "CyberHealthInstaller",
+    "CyberHealthUpdater",
     "CyberHealthUninstaller",
     "ConflictError",
     "IdempotencyMismatchError",

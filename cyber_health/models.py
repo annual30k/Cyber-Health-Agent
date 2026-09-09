@@ -544,6 +544,22 @@ class QueryMemoryInput(BaseModel):
     limit: int = Field(default=10, ge=1, le=50)
 
 
+class GetMemorySuggestionsInput(BaseModel):
+    """Read-only input for deterministic long-term memory candidate discovery."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str = Field(..., min_length=1)
+    date: str = Field(...)
+    window_days: int = Field(default=30, ge=1, le=90)
+    limit: int = Field(default=3, ge=1, le=3)
+
+    @field_validator("date")
+    @classmethod
+    def validate_date(cls, v: str) -> str:
+        return _check_real_date(v)
+
+
 class UnifiedResponse(BaseModel):
     operation_id: str
     status: Literal["success", "partial", "failed"]

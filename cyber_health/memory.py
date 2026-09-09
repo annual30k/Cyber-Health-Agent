@@ -18,5 +18,8 @@ class MemoryProvider(Protocol):
 
 
 class UnavailableMemoryProvider:
+    def __init__(self, reason: str = "No MemoryProvider is connected"):
+        self.reason = reason
+
     def call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
-        raise MemoryUnavailable("No MemoryProvider is connected")
+        raise MemoryUnavailable(self.reason)

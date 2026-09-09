@@ -36,6 +36,10 @@ class OnboardingFlowTests(unittest.TestCase):
         automation = profile["daily_review_automation"]
         self.assertEqual(automation["declaration_key"], "cyber-health:daily-review:new-user")
         self.assertEqual(automation["schedule"]["expression"], "30 21 * * *")
+        workflow = " ".join(automation["workflow"])
+        self.assertIn("session search/history", workflow)
+        self.assertIn("explicit user messages", workflow)
+        self.assertIn("assistant estimates", workflow)
         with service.store.connect() as conn:
             count = conn.execute("SELECT COUNT(*) AS c FROM user_profile").fetchone()["c"]
         self.assertEqual(count, 0)

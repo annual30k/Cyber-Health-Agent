@@ -289,6 +289,287 @@ class TestDomainAdvanced(unittest.TestCase):
             ).fetchone()["c"]
             self.assertEqual(pending_count_after, 0)
 
+    def test_uncertainty_aggregation_without_fake_confidence_intervals(self) -> None:
+        """Aggregate estimate ranges transparently without inventing a confidence level."""
+        user_id = "u_stats_user"
+        date = "2026-09-08"
+
+        # 1. Configure profile targets
+        self.service.update_profile(
+            user_id=user_id,
+            idempotency_key="u_stats_prof",
+            goals={
+                "target_kcal_low": 2100,
+                "target_kcal_high": 2300,
+                "target_protein_low": 120,
+                "target_protein_high": 150,
+            },
+        )
+
+        # 2. Log 5 meals simulating the user's real day
+        meals = [
+            ("breakfast", 190, 230, 17, 22),
+            ("lunch", 260, 320, 24, 30),
+            ("snack", 80, 100, 0, 1),
+            ("snack", 350, 500, 30, 45),
+            ("dinner", 550, 750, 38, 50),
+        ]
+        for idx, (mtype, k_low, k_high, p_low, p_high) in enumerate(meals):
+            self.service.log_meal(
+                user_id=user_id,
+                occurred_at=f"{date}T{8 + idx * 3:02d}:00:00+08:00",
+                meal_type=mtype,
+                foods=[{"name": f"Item {idx}"}],
+                kcal_low=k_low,
+                kcal_high=k_high,
+                protein_low=p_low,
+                protein_high=p_high,
+                idempotency_key=f"u_stats_meal_{idx}",
+            )
+
+        # 3. Daily review
+        review = self.service.daily_review(
+            user_id=user_id,
+            date=date,
+            idempotency_key="u_stats_review",
+        )
+        data = review["data"]
+        analysis = data["nutrition_analysis"]
+
+        # Classic bounds are preserved
+        self.assertEqual(analysis["intake_kcal_range"], [1430, 1900])
+        self.assertEqual(analysis["intake_protein_g_range"], [109, 148])
+        raw_kcal_spread = 1900 - 1430  # 470
+        raw_protein_spread = 148 - 109  # 39
+
+        # The heuristic uncertainty range contracts, but is not a confidence interval.
+        kcal_uncertainty = analysis["intake_kcal_uncertainty_range"]
+        stat_kcal_spread = kcal_uncertainty[1] - kcal_uncertainty[0]
+        self.assertLess(stat_kcal_spread, raw_kcal_spread * 0.65)  # Contracted by >35%
+        self.assertEqual(analysis["intake_kcal_mid"], 1665)
+        self.assertIsNone(analysis["intake_kcal_ci90"])
+
+        protein_uncertainty = analysis["intake_protein_uncertainty_range"]
+        stat_protein_spread = protein_uncertainty[1] - protein_uncertainty[0]
+        self.assertLess(stat_protein_spread, raw_protein_spread * 0.70)
+        self.assertEqual(analysis["intake_protein_mid"], 128)
+        self.assertIsNone(analysis["intake_protein_ci90"])
+
+        # Target gap is arithmetic against a policy interval; it is not a CI.
+        self.assertEqual(analysis["calorie_gap_mid"], 535)  # 2200 - 1665
+        raw_gap_spread = analysis["calorie_target_gap_range"][1] - analysis["calorie_target_gap_range"][0]  # 870 - 200 = 670
+        self.assertEqual(analysis["calorie_gap_uncertainty_range"], analysis["calorie_target_gap_range"])
+        self.assertEqual(
+            analysis["calorie_gap_uncertainty_range"][1] - analysis["calorie_gap_uncertainty_range"][0],
+            raw_gap_spread,
+        )
+        self.assertIsNone(analysis["calorie_gap_ci90"])
+
+        # The heuristic intake range remains inside the physical estimate bounds.
+        self.assertGreaterEqual(kcal_uncertainty[0], 1430)
+        self.assertLessEqual(kcal_uncertainty[1], 1900)
+        self.assertGreaterEqual(analysis["intake_kcal_mid"], kcal_uncertainty[0])
+        self.assertLessEqual(analysis["intake_kcal_mid"], kcal_uncertainty[1])
+        self.assertEqual(analysis["protein_gap_uncertainty_range"], analysis["protein_target_gap_range"])
+        self.assertIsNone(analysis["protein_gap_ci90"])
+
+        # Check get_today remaining clamping consistency
+        today = self.service.get_today(user_id=user_id, day=date)
+        rem = today["remaining"]
+        self.assertGreaterEqual(rem["kcal_mid"], rem["kcal_low"])
+        self.assertLessEqual(rem["kcal_mid"], rem["kcal_high"])
+        self.assertGreaterEqual(rem["protein_mid"], rem["protein_low"])
+        self.assertLessEqual(rem["protein_mid"], rem["protein_high"])
+
+        # Summary uses transparent heuristic terminology, never a false CI label.
+        self.assertIn("1665 kcal", data["summary"])
+        self.assertIn("128 g", data["summary"])
+        self.assertIn("合成不确定性范围", data["summary"])
+        self.assertNotIn("90%置信区间", data["summary"])
+        self.assertNotIn("极差", data["summary"])
+
+    def test_single_meal_interval_consistency(self) -> None:
+        """A single meal keeps its estimate bounds and emits no unsupported CI."""
+        user_id = "u_single_meal"
+        date = "2026-09-08"
+        self.service.update_profile(
+            user_id=user_id,
+            idempotency_key="u_single_prof",
+            goals={
+                "target_kcal_low": 2000,
+                "target_kcal_high": 2200,
+                "target_protein_low": 100,
+                "target_protein_high": 120,
+            },
+        )
+        self.service.log_meal(
+            user_id=user_id,
+            occurred_at=f"{date}T12:00:00+08:00",
+            meal_type="lunch",
+            foods=[{"name": "Chicken rice"}],
+            kcal_low=500,
+            kcal_high=700,
+            protein_low=30,
+            protein_high=40,
+            idempotency_key="u_single_meal_1",
+        )
+        review = self.service.daily_review(
+            user_id=user_id,
+            date=date,
+            idempotency_key="u_single_review",
+        )
+        data = review["data"]
+        analysis = data["nutrition_analysis"]
+
+        self.assertEqual(analysis["intake_kcal_range"], [500, 700])
+        self.assertEqual(analysis["intake_kcal_uncertainty_range"], [500, 700])
+        self.assertIsNone(analysis["intake_kcal_ci90"])
+        self.assertEqual(analysis["intake_kcal_mid"], 600)
+        # Target gap remains the arithmetic policy-vs-intake interval.
+        self.assertEqual(analysis["calorie_target_gap_range"], [1300, 1700])
+        self.assertEqual(analysis["calorie_gap_uncertainty_range"], [1300, 1700])
+        self.assertIsNone(analysis["calorie_gap_ci90"])
+        self.assertEqual(analysis["calorie_gap_mid"], 1500)
+        self.assertEqual(analysis["protein_target_gap_range"], [60, 90])
+        self.assertEqual(analysis["protein_gap_uncertainty_range"], [60, 90])
+        self.assertIsNone(analysis["protein_gap_ci90"])
+        self.assertEqual(analysis["protein_gap_mid"], 75)
+        self.assertIn("估算范围 500–700 kcal", data["summary"])
+        self.assertNotIn("90%置信区间", data["summary"])
+
+    def test_statistical_single_meal_vs_multi_meal_mathematical_properties(self) -> None:
+        """Verify heuristic aggregation and the separation of policy gaps from uncertainty."""
+        user_id = "u_math_test"
+        date = "2026-09-08"
+        self.service.update_profile(
+            user_id=user_id,
+            idempotency_key="u_math_prof",
+            goals={
+                "target_kcal_low": 2000,
+                "target_kcal_high": 2200,
+                "target_protein_low": 100,
+                "target_protein_high": 120,
+            },
+        )
+
+        # 1. Log First Meal (n=1)
+        self.service.log_meal(
+            user_id=user_id,
+            occurred_at=f"{date}T08:00:00+08:00",
+            meal_type="breakfast",
+            foods=[{"name": "Oatmeal and eggs"}],
+            kcal_low=400,
+            kcal_high=600,
+            protein_low=20,
+            protein_high=30,
+            idempotency_key="u_math_meal_1",
+        )
+        review1 = self.service.daily_review(
+            user_id=user_id,
+            date=date,
+            idempotency_key="u_math_rev_1",
+        )
+        ana1 = review1["data"]["nutrition_analysis"]
+
+        # For n=1 the uncertainty range equals the recorded estimate bounds.
+        self.assertEqual(ana1["intake_kcal_uncertainty_range"], [400, 600])
+        self.assertIsNone(ana1["intake_kcal_ci90"])
+        self.assertEqual(ana1["intake_kcal_mid"], 500)
+        self.assertEqual(ana1["calorie_target_gap_range"], [1400, 1800])
+        self.assertEqual(ana1["calorie_gap_uncertainty_range"], [1400, 1800])
+        self.assertIsNone(ana1["calorie_gap_ci90"])
+        self.assertEqual(ana1["calorie_gap_mid"], 1600)  # 2100 - 500
+
+        # 2. Log Second Meal (n=2) -> CLT applies
+        self.service.log_meal(
+            user_id=user_id,
+            occurred_at=f"{date}T12:30:00+08:00",
+            meal_type="lunch",
+            foods=[{"name": "Salmon and sweet potato"}],
+            kcal_low=600,
+            kcal_high=800,
+            protein_low=35,
+            protein_high=45,
+            idempotency_key="u_math_meal_2",
+        )
+        review2 = self.service.daily_review(
+            user_id=user_id,
+            date=date,
+            idempotency_key="u_math_rev_2",
+        )
+        ana2 = review2["data"]["nutrition_analysis"]
+
+        # Intake bounds for n=2: sum of bounds = [1000, 1400], spread = 400.
+        self.assertEqual(ana2["intake_kcal_range"], [1000, 1400])
+        raw_spread = 1400 - 1000
+        stat_spread = ana2["intake_kcal_uncertainty_range"][1] - ana2["intake_kcal_uncertainty_range"][0]
+        # RSS half-width is a documented display heuristic, not a CI.
+        self.assertLess(stat_spread, raw_spread * 0.75)
+        self.assertEqual(ana2["intake_kcal_mid"], 1200)
+        self.assertIsNone(ana2["intake_kcal_ci90"])
+
+        # Strict containment guarantees for the heuristic range.
+        self.assertGreaterEqual(ana2["intake_kcal_uncertainty_range"][0], ana2["intake_kcal_range"][0])
+        self.assertLessEqual(ana2["intake_kcal_uncertainty_range"][1], ana2["intake_kcal_range"][1])
+        self.assertGreaterEqual(ana2["intake_kcal_mid"], ana2["intake_kcal_uncertainty_range"][0])
+        self.assertLessEqual(ana2["intake_kcal_mid"], ana2["intake_kcal_uncertainty_range"][1])
+
+        # Target gap is always the raw arithmetic policy-vs-intake interval:
+        # target = [2000, 2200], intake = [1000, 1400]
+        # raw_gap = [2000 - 1400, 2200 - 1000] = [600, 1200]
+        self.assertEqual(ana2["calorie_target_gap_range"], [600, 1200])
+        raw_gap_spread = 1200 - 600  # 600
+        self.assertEqual(ana2["calorie_gap_uncertainty_range"], ana2["calorie_target_gap_range"])
+        self.assertEqual(
+            ana2["calorie_gap_uncertainty_range"][1] - ana2["calorie_gap_uncertainty_range"][0],
+            raw_gap_spread,
+        )
+        self.assertIsNone(ana2["calorie_gap_ci90"])
+        self.assertEqual(ana2["calorie_gap_mid"], 900)  # 2100 - 1200
+
+        self.assertGreaterEqual(ana2["calorie_gap_mid"], ana2["calorie_gap_uncertainty_range"][0])
+        self.assertLessEqual(ana2["calorie_gap_mid"], ana2["calorie_gap_uncertainty_range"][1])
+
+    def test_zero_variance_exact_meal_bounds(self) -> None:
+        """When user logs exact values (low == high), variance is zero, mid equals value, and bounds match."""
+        user_id = "u_exact_meal"
+        date = "2026-09-08"
+        self.service.update_profile(
+            user_id=user_id,
+            idempotency_key="u_exact_prof",
+            goals={
+                "target_kcal_low": 2000,
+                "target_kcal_high": 2000,
+                "target_protein_low": 100,
+                "target_protein_high": 100,
+            },
+        )
+        self.service.log_meal(
+            user_id=user_id,
+            occurred_at=f"{date}T12:00:00+08:00",
+            meal_type="lunch",
+            foods=[{"name": "Measured meal"}],
+            kcal_low=600,
+            kcal_high=600,
+            protein_low=40,
+            protein_high=40,
+            idempotency_key="u_exact_meal_1",
+        )
+        review = self.service.daily_review(
+            user_id=user_id,
+            date=date,
+            idempotency_key="u_exact_rev",
+        )
+        analysis = review["data"]["nutrition_analysis"]
+        self.assertEqual(analysis["intake_kcal_range"], [600, 600])
+        self.assertEqual(analysis["intake_kcal_uncertainty_range"], [600, 600])
+        self.assertIsNone(analysis["intake_kcal_ci90"])
+        self.assertEqual(analysis["intake_kcal_mid"], 600)
+        self.assertEqual(analysis["calorie_target_gap_range"], [1400, 1400])
+        self.assertEqual(analysis["calorie_gap_uncertainty_range"], [1400, 1400])
+        self.assertIsNone(analysis["calorie_gap_ci90"])
+        self.assertEqual(analysis["calorie_gap_mid"], 1400)
+
 
 if __name__ == "__main__":
     unittest.main()

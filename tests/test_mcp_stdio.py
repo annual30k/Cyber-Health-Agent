@@ -48,6 +48,9 @@ class TestMCPStdio(unittest.IsolatedAsyncioTestCase):
                 init_result = await session.initialize()
                 self.assertIn("cyber_health_get_profile", init_result.instructions or "")
                 self.assertIn("cyber_health_update_profile", init_result.instructions or "")
+                self.assertIn("status=success", init_result.instructions or "")
+                self.assertIn("session search/history", init_result.instructions or "")
+                self.assertIn("explicit user messages", init_result.instructions or "")
 
                 # 1. Verify exactly 7 P0 tools discovered
                 tools_res = await session.list_tools()
@@ -164,8 +167,8 @@ class TestMCPStdio(unittest.IsolatedAsyncioTestCase):
                 tool_names = [t.name for t in tools_res.tools]
                 tools_by_name = {t.name: t for t in tools_res.tools}
 
-                # Exactly 26 tools (7 P0 + 19 extended domain capabilities)
-                self.assertEqual(len(tool_names), 26)
+                # Exactly 27 tools (7 P0 + 20 extended domain capabilities)
+                self.assertEqual(len(tool_names), 27)
                 self.assertIn("cyber_health_log_daily_metrics", tool_names)
                 self.assertIn("cyber_health_delete_meal", tool_names)
                 self.assertIn("cyber_health_log_workout", tool_names)
@@ -185,6 +188,7 @@ class TestMCPStdio(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("cyber_health_schedule_daily_reminders", tool_names)
                 self.assertIn("cyber_health_update_schedule_event", tool_names)
                 self.assertIn("cyber_health_query_memory", tool_names)
+                self.assertIn("cyber_health_get_memory_suggestions", tool_names)
 
                 # Verify granular safety annotations
                 del_meal_ann = tools_by_name["cyber_health_delete_meal"].annotations
@@ -210,6 +214,11 @@ class TestMCPStdio(unittest.IsolatedAsyncioTestCase):
                 qm_ann = tools_by_name["cyber_health_query_memory"].annotations
                 self.assertTrue(qm_ann.readOnlyHint)
                 self.assertTrue(qm_ann.openWorldHint)
+
+                suggestion_ann = tools_by_name["cyber_health_get_memory_suggestions"].annotations
+                self.assertTrue(suggestion_ann.readOnlyHint)
+                self.assertFalse(suggestion_ann.destructiveHint)
+                self.assertFalse(suggestion_ann.openWorldHint)
 
                 # Test stdio invocation of newly connected extended tools
                 # 1. get_training_plan

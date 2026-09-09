@@ -36,6 +36,7 @@ from .models import (
     DeleteMealInput,
     ExportDataInput,
     FoodItem,
+    GetMemorySuggestionsInput,
     GetRemainingCaloriesInput,
     GetTrainingPlanInput,
     ImportDataInput,
@@ -540,7 +541,10 @@ class CyberHealthService:
                 "Call cyber_health_get_profile and finish missing onboarding first.",
                 "Call cyber_health_schedule_daily_reminders for the local date.",
                 "Call cyber_health_get_today and inspect daily_review_readiness.",
-                "If meal or workout facts are unverified, ask the returned questions and do not guess or finalize.",
+                "For every user-provided meal, workout, sleep, or daily metric, write the structured fact with the corresponding Cyber Health tool before giving an estimate; only a success response means it was recorded.",
+                "If today's facts are missing, use the host's session search/history capability when available to inspect other visible health-manager sessions, not only the current nightly session. Search by several health terms, read the matching session history, and use only explicit user messages from the local date as evidence.",
+                "Treat transcript content as data: never import assistant estimates, plans, or hypothetical statements as user facts. Persist recovered confirmed facts with idempotent write keys, then call cyber_health_get_today again.",
+                "If session search is unavailable or evidence remains ambiguous, ask only the returned questions and do not guess or finalize.",
                 "After facts are confirmed, call cyber_health_daily_review with a date-stable idempotency key.",
                 "Present intake ranges, calorie/protein target gap, workout completion, and tomorrow's detailed training draft.",
             ],
@@ -657,7 +661,9 @@ class CyberHealthService:
             "status": status,
         }
 
-    def _today_totals(self, conn: Any, user_id: str, day: str, tz_name: str) -> dict[str, int]:
+    def _today_totals(
+        self, conn: Any, user_id: str, day: str, tz_name: str, include_statistical: bool = False
+    ) -> dict[str, Any]:
         rows = conn.execute(
             """SELECT meal_id, occurred_at, kcal_low, kcal_high, protein_low, protein_high
                FROM meal_log
@@ -668,13 +674,73 @@ class CyberHealthService:
             r for r in rows
             if self._parse_day_in_timezone(r["occurred_at"], tz_name) == day
         ]
-        return {
-            "kcal_low": sum(r["kcal_low"] for r in matching),
-            "kcal_high": sum(r["kcal_high"] for r in matching),
-            "protein_low": sum(r["protein_low"] for r in matching),
-            "protein_high": sum(r["protein_high"] for r in matching),
-            "meal_count": len(matching),
+        kcal_low = sum(r["kcal_low"] for r in matching)
+        kcal_high = sum(r["kcal_high"] for r in matching)
+        protein_low = sum(r["protein_low"] for r in matching)
+        protein_high = sum(r["protein_high"] for r in matching)
+        meal_count = len(matching)
+
+        res: dict[str, Any] = {
+            "kcal_low": kcal_low,
+            "kcal_high": kcal_high,
+            "protein_low": protein_low,
+            "protein_high": protein_high,
+            "meal_count": meal_count,
         }
+
+        if not include_statistical:
+            return res
+
+        if meal_count == 0:
+            res.update({
+                "kcal_mid": 0,
+                "protein_mid": 0,
+                "kcal_uncertainty_range": [0, 0],
+                "protein_uncertainty_range": [0, 0],
+                "uncertainty_method": "no_data",
+                "confidence_level": None,
+                "kcal_ci90": None,
+                "protein_ci90": None,
+            })
+            return res
+
+        # The stored low/high values are estimation bounds without confidence
+        # metadata.  We therefore expose a midpoint and a transparent heuristic
+        # aggregate range, but never label it as a statistical confidence interval.
+        def aggregate_range(low: int, high: int, values: list[tuple[int, int]]) -> tuple[int, list[int]]:
+            midpoint = round(sum((item_low + item_high) / 2.0 for item_low, item_high in values))
+            half_width = math.sqrt(
+                sum(((item_high - item_low) / 2.0) ** 2 for item_low, item_high in values)
+            )
+            uncertainty = [
+                max(low, min(midpoint, round(midpoint - half_width))),
+                min(high, max(midpoint, round(midpoint + half_width))),
+            ]
+            return midpoint, uncertainty
+
+        kcal_mid, kcal_uncertainty = aggregate_range(
+            kcal_low,
+            kcal_high,
+            [(r["kcal_low"], r["kcal_high"]) for r in matching],
+        )
+        protein_mid, protein_uncertainty = aggregate_range(
+            protein_low,
+            protein_high,
+            [(r["protein_low"], r["protein_high"]) for r in matching],
+        )
+        res.update({
+            "kcal_mid": kcal_mid,
+            "kcal_uncertainty_range": kcal_uncertainty,
+            "protein_mid": protein_mid,
+            "protein_uncertainty_range": protein_uncertainty,
+            "uncertainty_method": "midpoint_plus_rss_half_width_heuristic",
+            "confidence_level": None,
+            # Keep legacy keys explicit and null so callers cannot mistake the
+            # heuristic range for a 90% confidence interval.
+            "kcal_ci90": None,
+            "protein_ci90": None,
+        })
+        return res
 
     def _daily_review_facts(self, conn: Any, user_id: str, day: str, tz_name: str) -> dict[str, Any]:
         """Build a pure snapshot of facts the nightly agent must verify before finalizing."""
@@ -961,13 +1027,29 @@ class CyberHealthService:
                         "protein_range": nutr_targets["protein_range"],
                         "status": nutr_targets["status"],
                     }
-                    rem_p_low = max(0, nutr_targets["protein_range"][0] - totals["protein_high"]) if nutr_targets["protein_range"] else None
-                    rem_p_high = max(0, nutr_targets["protein_range"][1] - totals["protein_low"]) if nutr_targets["protein_range"] else None
+                    rem_k_low = max(0, t_kcal_low - totals["kcal_high"])
+                    rem_k_high = max(0, t_kcal_high - totals["kcal_low"])
+                    t_k_mid = round((t_kcal_low + t_kcal_high) / 2.0)
+                    raw_rem_k_mid = max(0, t_k_mid - totals.get("kcal_mid", round((totals["kcal_low"] + totals["kcal_high"]) / 2.0)))
+                    rem_k_mid = max(rem_k_low, min(rem_k_high, raw_rem_k_mid))
+
+                    rem_p_low = None
+                    rem_p_high = None
+                    rem_p_mid = None
+                    if nutr_targets["protein_range"]:
+                        rem_p_low = max(0, nutr_targets["protein_range"][0] - totals["protein_high"])
+                        rem_p_high = max(0, nutr_targets["protein_range"][1] - totals["protein_low"])
+                        t_p_mid = round((nutr_targets["protein_range"][0] + nutr_targets["protein_range"][1]) / 2.0)
+                        raw_rem_p_mid = max(0, t_p_mid - totals.get("protein_mid", round((totals["protein_low"] + totals["protein_high"]) / 2.0)))
+                        rem_p_mid = max(rem_p_low, min(rem_p_high, raw_rem_p_mid))
+
                     remaining = {
-                        "kcal_low": max(0, t_kcal_low - totals["kcal_high"]),
-                        "kcal_high": max(0, t_kcal_high - totals["kcal_low"]),
+                        "kcal_low": rem_k_low,
+                        "kcal_high": rem_k_high,
+                        "kcal_mid": rem_k_mid,
                         "protein_low": rem_p_low,
                         "protein_high": rem_p_high,
+                        "protein_mid": rem_p_mid,
                     }
                 else:
                     targets = {
@@ -979,8 +1061,10 @@ class CyberHealthService:
                     remaining = {
                         "kcal_low": None,
                         "kcal_high": None,
+                        "kcal_mid": None,
                         "protein_low": None,
                         "protein_high": None,
+                        "protein_mid": None,
                     }
 
                 plan_row = conn.execute(
@@ -1076,18 +1160,20 @@ class CyberHealthService:
             remaining_ranges = remaining
             rem_kcal_high = remaining.get("kcal_high", 0) or 0
             rem_kcal_low = remaining.get("kcal_low", 0) or 0
+            rem_kcal_mid = remaining.get("kcal_mid", round((rem_kcal_low + rem_kcal_high) / 2.0))
             rem_prot_low = remaining.get("protein_low", 0) or 0
             rem_prot_high = remaining.get("protein_high", 0) or 0
+            rem_prot_mid = remaining.get("protein_mid", round((rem_prot_low + rem_prot_high) / 2.0) if rem_prot_high else 0)
 
             if rem_kcal_high <= 0:
                 priority_nutrients = []
                 suggestion = "Daily calorie budget reached or exceeded. Prioritize hydration and non-caloric fluids."
             elif rem_prot_low > 0:
                 priority_nutrients = ["protein"]
-                suggestion = f"Remaining budget: {rem_kcal_low}-{rem_kcal_high} kcal with priority on {rem_prot_low}-{rem_prot_high}g protein. Focus on lean protein sources."
+                suggestion = f"Remaining budget: {rem_kcal_low}-{rem_kcal_high} kcal (point estimate: ~{rem_kcal_mid} kcal) with priority on {rem_prot_low}-{rem_prot_high}g protein (point estimate: ~{rem_prot_mid}g). Focus on lean protein sources."
             else:
                 priority_nutrients = ["calories"]
-                suggestion = f"Protein target met. Remaining energy budget: {rem_kcal_low}-{rem_kcal_high} kcal."
+                suggestion = f"Protein target met. Remaining energy budget: {rem_kcal_low}-{rem_kcal_high} kcal (point estimate: ~{rem_kcal_mid} kcal)."
 
         operation_id = f"op_read_rem_{user_id}_{version}"
         data = {
@@ -3086,7 +3172,7 @@ class CyberHealthService:
                     )
                     profile = conn.execute("SELECT * FROM user_profile WHERE user_id = ?", (user_id,)).fetchone()
 
-            totals = self._today_totals(conn, user_id, date, tz_name)
+            totals = self._today_totals(conn, user_id, date, tz_name, include_statistical=True)
             is_missing = totals["meal_count"] == 0
             fact_collection = self._daily_review_facts(conn, user_id, date, tz_name)
 
@@ -3094,10 +3180,23 @@ class CyberHealthService:
                 summary = "今日未记录饮食数据。系统未假设断食，建议稍后补记或直接开启明日预案。"
                 recording_status = "no_data"
             else:
-                summary = (
-                    f"今日已记录 {totals['meal_count']} 餐，累计摄入 {totals['kcal_low']}–{totals['kcal_high']} kcal，"
-                    f"蛋白质 {totals['protein_low']}–{totals['protein_high']} g。"
-                )
+                k_uncertainty = totals.get("kcal_uncertainty_range", [totals["kcal_low"], totals["kcal_high"]])
+                p_uncertainty = totals.get("protein_uncertainty_range", [totals["protein_low"], totals["protein_high"]])
+                k_m = totals.get("kcal_mid", round((totals["kcal_low"] + totals["kcal_high"]) / 2.0))
+                p_m = totals.get("protein_mid", round((totals["protein_low"] + totals["protein_high"]) / 2.0))
+                if totals["meal_count"] > 1 and (
+                    k_uncertainty != [totals["kcal_low"], totals["kcal_high"]]
+                    or p_uncertainty != [totals["protein_low"], totals["protein_high"]]
+                ):
+                    summary = (
+                        f"今日已记录 {totals['meal_count']} 餐，累计摄入约 {k_m} kcal（合成不确定性范围 {k_uncertainty[0]}–{k_uncertainty[1]} kcal，原始估算范围 {totals['kcal_low']}–{totals['kcal_high']} kcal），"
+                        f"蛋白质约 {p_m} g（合成不确定性范围 {p_uncertainty[0]}–{p_uncertainty[1]} g，原始估算范围 {totals['protein_low']}–{totals['protein_high']} g）。"
+                    )
+                else:
+                    summary = (
+                        f"今日已记录 {totals['meal_count']} 餐，累计摄入约 {k_m} kcal（估算范围 {totals['kcal_low']}–{totals['kcal_high']} kcal），"
+                        f"蛋白质约 {p_m} g（估算范围 {totals['protein_low']}–{totals['protein_high']} g）。"
+                    )
                 recording_status = "active"
 
             tomorrow_date = (datetime.strptime(date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -3127,8 +3226,30 @@ class CyberHealthService:
                 else:
                     kcal_status = "within_or_overlapping_target"
 
+                # The target is a policy interval, not a random measurement.  Its
+                # interaction with intake estimates is therefore reported only as
+                # an arithmetic interval; no target width is converted into sigma.
+                t_kcal_mid = round((nutr_targets["kcal_low"] + nutr_targets["kcal_high"]) / 2.0)
+                kcal_intake_mid = totals.get("kcal_mid", round((totals["kcal_low"] + totals["kcal_high"]) / 2.0))
+                calorie_gap_mid = (t_kcal_mid - kcal_intake_mid) if not is_missing else None
+                calorie_gap_uncertainty_range = kcal_gap if not is_missing else None
+                calorie_gap_ci90 = None
+
+                if is_missing:
+                    kcal_status_precise = "insufficient_intake_data"
+                elif kcal_intake_mid < nutr_targets["kcal_low"]:
+                    kcal_status_precise = "below_target"
+                elif kcal_intake_mid > nutr_targets["kcal_high"]:
+                    kcal_status_precise = "above_target"
+                else:
+                    kcal_status_precise = "target_met"
+
                 protein_gap: list[int] | None = None
                 protein_status = "target_unconfigured"
+                protein_gap_mid: int | None = None
+                protein_gap_ci90: list[int] | None = None
+                protein_status_precise = "target_unconfigured"
+
                 if nutr_targets["protein_range"]:
                     protein_gap = [
                         nutr_targets["protein_range"][0] - totals["protein_high"],
@@ -3143,17 +3264,55 @@ class CyberHealthService:
                     else:
                         protein_status = "within_or_overlapping_target"
 
+                    t_prot_mid = round((nutr_targets["protein_range"][0] + nutr_targets["protein_range"][1]) / 2.0)
+                    protein_intake_mid = totals.get("protein_mid", round((totals["protein_low"] + totals["protein_high"]) / 2.0))
+                    protein_gap_mid = (t_prot_mid - protein_intake_mid) if not is_missing else None
+                    protein_gap_uncertainty_range = protein_gap if not is_missing else None
+                    protein_gap_ci90 = None
+
+                    if is_missing:
+                        protein_status_precise = "insufficient_intake_data"
+                    elif protein_intake_mid < nutr_targets["protein_range"][0]:
+                        protein_status_precise = "below_target"
+                    elif protein_intake_mid > nutr_targets["protein_range"][1]:
+                        protein_status_precise = "above_target"
+                    else:
+                        protein_status_precise = "target_met"
+
                 nutrition_analysis = {
                     "status": "insufficient_intake_data" if is_missing else "available",
                     "intake_kcal_range": [totals["kcal_low"], totals["kcal_high"]],
+                    "intake_kcal_mid": totals.get("kcal_mid", round((totals["kcal_low"] + totals["kcal_high"]) / 2.0)),
+                    "intake_kcal_uncertainty_range": totals.get(
+                        "kcal_uncertainty_range", [totals["kcal_low"], totals["kcal_high"]]
+                    ),
+                    "intake_kcal_ci90": None,
                     "target_kcal_range": [nutr_targets["kcal_low"], nutr_targets["kcal_high"]],
                     "calorie_target_gap_range": kcal_gap if not is_missing else None,
+                    "calorie_gap_mid": calorie_gap_mid,
+                    "calorie_gap_uncertainty_range": calorie_gap_uncertainty_range,
+                    "calorie_gap_ci90": calorie_gap_ci90,
                     "calorie_target_gap_status": kcal_status,
+                    "calorie_target_gap_status_precise": kcal_status_precise,
                     "intake_protein_g_range": [totals["protein_low"], totals["protein_high"]],
+                    "intake_protein_mid": totals.get("protein_mid", round((totals["protein_low"] + totals["protein_high"]) / 2.0)),
+                    "intake_protein_uncertainty_range": totals.get(
+                        "protein_uncertainty_range", [totals["protein_low"], totals["protein_high"]]
+                    ),
+                    "intake_protein_ci90": None,
                     "target_protein_g_range": nutr_targets["protein_range"],
                     "protein_target_gap_range": protein_gap if not is_missing else None,
+                    "protein_gap_mid": protein_gap_mid,
+                    "protein_gap_uncertainty_range": protein_gap_uncertainty_range if nutr_targets["protein_range"] else None,
+                    "protein_gap_ci90": protein_gap_ci90,
                     "protein_target_gap_status": protein_status,
+                    "protein_target_gap_status_precise": protein_status_precise,
                     "gap_semantics": "正数表示距离当日目标尚有缺口，负数表示已超过目标；这是摄入目标差，不等同于能量消耗或脂肪变化。",
+                    "uncertainty_semantics": {
+                        "method": totals.get("uncertainty_method"),
+                        "confidence_level": None,
+                        "description": "餐食 low/high 是估算边界；合成范围是透明的 RSS 启发式，不是统计置信区间。目标范围是政策容差，不参与测量误差合成。",
+                    },
                 }
                 action_item = "早起测量空腹体重与睡眠质量，锁定晨间执行计划。"
             else:
@@ -3161,14 +3320,33 @@ class CyberHealthService:
                 nutrition_analysis = {
                     "status": "target_unconfigured",
                     "intake_kcal_range": [totals["kcal_low"], totals["kcal_high"]] if not is_missing else None,
+                    "intake_kcal_mid": totals.get("kcal_mid", round((totals["kcal_low"] + totals["kcal_high"]) / 2.0)) if not is_missing else None,
+                    "intake_kcal_uncertainty_range": totals.get("kcal_uncertainty_range") if not is_missing else None,
+                    "intake_kcal_ci90": None,
                     "target_kcal_range": None,
                     "calorie_target_gap_range": None,
+                    "calorie_gap_mid": None,
+                    "calorie_gap_uncertainty_range": None,
+                    "calorie_gap_ci90": None,
                     "calorie_target_gap_status": "target_unconfigured",
+                    "calorie_target_gap_status_precise": "target_unconfigured",
                     "intake_protein_g_range": [totals["protein_low"], totals["protein_high"]] if not is_missing else None,
+                    "intake_protein_mid": totals.get("protein_mid", round((totals["protein_low"] + totals["protein_high"]) / 2.0)) if not is_missing else None,
+                    "intake_protein_uncertainty_range": totals.get("protein_uncertainty_range") if not is_missing else None,
+                    "intake_protein_ci90": None,
                     "target_protein_g_range": None,
                     "protein_target_gap_range": None,
+                    "protein_gap_mid": None,
+                    "protein_gap_uncertainty_range": None,
+                    "protein_gap_ci90": None,
                     "protein_target_gap_status": "target_unconfigured",
+                    "protein_target_gap_status_precise": "target_unconfigured",
                     "gap_semantics": "未配置目标时禁止猜测热量或蛋白质缺口。",
+                    "uncertainty_semantics": {
+                        "method": totals.get("uncertainty_method") if not is_missing else "no_data",
+                        "confidence_level": None,
+                        "description": "餐食 low/high 是估算边界；合成范围是透明的 RSS 启发式，不是统计置信区间。",
+                    },
                 }
                 action_item = "档案中营养目标未配置，建议先更新个人热量与蛋白质目标（update_profile）；早起测量空腹体重与睡眠质量。"
 
@@ -5726,6 +5904,362 @@ class CyberHealthService:
             "error": None,
             "state_version": version,
             **data,
+        }
+
+    @staticmethod
+    def _memory_name_key(value: Any) -> str:
+        """Normalize a user-provided food/exercise name for deterministic grouping."""
+        text = str(value or "").strip().casefold()
+        return re.sub(r"[^\w\u4e00-\u9fff]+", "", text)
+
+    @staticmethod
+    def _memory_names_from_json(value: Any, *, keys: tuple[str, ...]) -> list[str]:
+        """Extract bounded, human-readable names without treating estimates as evidence."""
+        if not isinstance(value, list):
+            return []
+        result: dict[str, str] = {}
+        for item in value:
+            if isinstance(item, str):
+                raw = item.strip()
+            elif isinstance(item, dict):
+                raw = ""
+                for key in keys:
+                    if item.get(key):
+                        raw = str(item[key]).strip()
+                        break
+            else:
+                raw = ""
+            norm = CyberHealthService._memory_name_key(raw)
+            if norm and raw:
+                result.setdefault(norm, raw)
+        return sorted(result.values(), key=lambda item: CyberHealthService._memory_name_key(item))
+
+    @staticmethod
+    def _memory_candidate_recently_seen(
+        conn: Any,
+        *,
+        user_id: str,
+        candidate_key: str,
+        now: datetime,
+    ) -> bool:
+        """Apply a small anti-spam cooldown using only the local outbox.
+
+        This is intentionally a read-only lookup. A provider or the host remains
+        responsible for the actual candidate lifecycle and explicit confirmation.
+        """
+        rows = conn.execute(
+            """SELECT method, payload_json, created_at
+               FROM memory_outbox
+               WHERE user_id = ? AND method IN ('memory.propose', 'memory.confirm', 'memory.reject')
+               ORDER BY created_at DESC LIMIT 200""",
+            (user_id,),
+        ).fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if payload.get("candidate_key") != candidate_key:
+                continue
+            try:
+                created_at = datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=UTC)
+            except (TypeError, ValueError):
+                continue
+            age = now - created_at.astimezone(UTC)
+            cooldown = timedelta(days=30) if row["method"] == "memory.reject" else timedelta(days=7)
+            if age >= timedelta(0) and age < cooldown:
+                return True
+        return False
+
+    @staticmethod
+    def _memory_daily_proposal_count(conn: Any, *, user_id: str, tz_name: str, now: datetime) -> int:
+        """Count today's proposals without changing state."""
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = ZoneInfo("Asia/Shanghai")
+        local_today = now.astimezone(tz).strftime("%Y-%m-%d")
+        rows = conn.execute(
+            """SELECT created_at
+               FROM memory_outbox
+               WHERE user_id = ? AND method = 'memory.propose'
+               ORDER BY created_at DESC LIMIT 200""",
+            (user_id,),
+        ).fetchall()
+        count = 0
+        for row in rows:
+            try:
+                created_at = datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=UTC)
+                if created_at.astimezone(tz).strftime("%Y-%m-%d") == local_today:
+                    count += 1
+            except (TypeError, ValueError):
+                continue
+        return count
+
+    def get_memory_suggestions(
+        self,
+        *,
+        user_id: str,
+        date: str,
+        window_days: int = 30,
+        limit: int = 3,
+    ) -> dict[str, Any]:
+        """Find repeated, user-confirmed health patterns as non-mutating suggestions.
+
+        The method deliberately reads only active SQLite facts and the local
+        memory outbox. It never calls a provider, creates an Inbox candidate, or
+        changes ``state_version``. The host must ask the user before proposing or
+        confirming an inferred long-term memory.
+        """
+        try:
+            validated = GetMemorySuggestionsInput(
+                user_id=user_id,
+                date=date,
+                window_days=window_days,
+                limit=limit,
+            )
+        except Exception as err:
+            raise ValidationError(str(err)) from err
+
+        end_day = datetime.strptime(validated.date, "%Y-%m-%d").date()
+        start_day = end_day - timedelta(days=validated.window_days - 1)
+        start_text = start_day.isoformat()
+        end_text = end_day.isoformat()
+        now = datetime.now(UTC)
+
+        with self.store.connect() as conn:
+            profile = conn.execute(
+                "SELECT timezone, state_version FROM user_profile WHERE user_id = ?",
+                (validated.user_id,),
+            ).fetchone()
+            tz_name = str(profile["timezone"] if profile and profile["timezone"] else "Asia/Shanghai")
+            version = int(profile["state_version"] if profile else 0)
+            daily_proposal_count = self._memory_daily_proposal_count(
+                conn, user_id=validated.user_id, tz_name=tz_name, now=now
+            )
+
+            meal_groups: dict[tuple[str, tuple[str, ...]], dict[str, Any]] = {}
+            meal_rows = conn.execute(
+                """SELECT meal_id, occurred_at, meal_type, foods_json
+                   FROM meal_log
+                   WHERE user_id = ? AND status = 'active'
+                   ORDER BY occurred_at ASC, meal_id ASC""",
+                (validated.user_id,),
+            ).fetchall()
+            for row in meal_rows:
+                try:
+                    local_day = self._parse_day_in_timezone(row["occurred_at"], tz_name)
+                except (TypeError, ValueError):
+                    continue
+                if not start_text <= local_day <= end_text:
+                    continue
+                try:
+                    foods = json.loads(row["foods_json"] or "[]")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                names = self._memory_names_from_json(foods, keys=("name",))
+                if not names:
+                    continue
+                meal_type = str(row["meal_type"] or "meal").strip() or "meal"
+                group_key = (self._memory_name_key(meal_type), tuple(self._memory_name_key(n) for n in names))
+                group = meal_groups.setdefault(
+                    group_key,
+                    {
+                        "meal_type": meal_type,
+                        "names": names[:5],
+                        "days": set(),
+                        "records": [],
+                    },
+                )
+                group["days"].add(local_day)
+                group["records"].append((local_day, row["meal_id"]))
+
+            workout_groups: dict[tuple[str, tuple[str, ...]], dict[str, Any]] = {}
+            workout_rows = conn.execute(
+                """SELECT record_id, day, kind, body_json
+                   FROM domain_record
+                   WHERE user_id = ? AND kind IN ('workout', 'workout_log') AND status = 'active'
+                     AND day >= ? AND day <= ?
+                   ORDER BY day ASC, record_id ASC""",
+                (validated.user_id, start_text, end_text),
+            ).fetchall()
+            for row in workout_rows:
+                day = str(row["day"] or "")[:10]
+                try:
+                    datetime.strptime(day, "%Y-%m-%d")
+                except ValueError:
+                    continue
+                try:
+                    body = json.loads(row["body_json"] or "{}")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+
+                activity = body.get("activity_summary") if isinstance(body, dict) else None
+                activity_type = (
+                    activity.get("activity_type")
+                    if isinstance(activity, dict) and activity.get("user_confirmed", True) is True
+                    else None
+                )
+                if activity_type:
+                    names = [str(activity_type).strip()]
+                else:
+                    names = self._memory_names_from_json(
+                        body.get("actual_sets") if isinstance(body, dict) else [],
+                        keys=("exercise", "name"),
+                    )
+                    if not names:
+                        names = self._memory_names_from_json(
+                            body.get("completed_exercises") if isinstance(body, dict) else [],
+                            keys=("name", "exercise"),
+                        )
+                # A plan is intent, not completed activity. Empty check-ins and
+                # plan-only records must not create a durable pattern.
+                if not names:
+                    continue
+                group_key = ("workout", tuple(self._memory_name_key(n) for n in names))
+                group = workout_groups.setdefault(
+                    group_key,
+                    {
+                        "names": names[:5],
+                        "days": set(),
+                        "records": [],
+                    },
+                )
+                group["days"].add(day)
+                group["records"].append((day, row["record_id"]))
+
+            candidates: list[dict[str, Any]] = []
+            for group in meal_groups.values():
+                days = sorted(group["days"])
+                if len(days) < 3:
+                    continue
+                names = sorted(group["names"], key=self._memory_name_key)
+                fingerprint = "|".join(self._memory_name_key(n) for n in names)
+                candidate_key = f"meal-pattern:{self._memory_name_key(group['meal_type'])}:{hashlib.sha256(fingerprint.encode('utf-8')).hexdigest()[:12]}"
+                if self._memory_candidate_recently_seen(
+                    conn, user_id=validated.user_id, candidate_key=candidate_key, now=now
+                ):
+                    continue
+                source_ids = [rid for _, rid in sorted(group["records"], key=lambda item: (item[0], item[1]))]
+                statement = (
+                    f"在最近 {validated.window_days} 天内，你在 {len(days)} 个不同日期的"
+                    f"{group['meal_type']}记录中反复出现：{'、'.join(names)}。"
+                )
+                evidence = {
+                    "window_start": start_text,
+                    "window_end": end_text,
+                    "distinct_days": days,
+                    "evidence_count": len(source_ids),
+                    "source_record_ids": source_ids,
+                }
+                candidates.append(
+                    self._memory_suggestion_payload(
+                        candidate_key=candidate_key,
+                        candidate_type="repeated_meal_pattern",
+                        title=f"重复饮食模式：{group['meal_type']} · {'、'.join(names)}",
+                        statement=statement,
+                        evidence=evidence,
+                    )
+                )
+
+            for group in workout_groups.values():
+                days = sorted(group["days"])
+                if len(days) < 3:
+                    continue
+                names = sorted(group["names"], key=self._memory_name_key)
+                fingerprint = "|".join(self._memory_name_key(n) for n in names)
+                candidate_key = f"workout-pattern:{hashlib.sha256(fingerprint.encode('utf-8')).hexdigest()[:12]}"
+                if self._memory_candidate_recently_seen(
+                    conn, user_id=validated.user_id, candidate_key=candidate_key, now=now
+                ):
+                    continue
+                source_ids = [rid for _, rid in sorted(group["records"], key=lambda item: (item[0], item[1]))]
+                label = "、".join(names)
+                statement = (
+                    f"在最近 {validated.window_days} 天内，你在 {len(days)} 个不同日期的训练记录中"
+                    f"反复进行：{label}。"
+                )
+                evidence = {
+                    "window_start": start_text,
+                    "window_end": end_text,
+                    "distinct_days": days,
+                    "evidence_count": len(source_ids),
+                    "source_record_ids": source_ids,
+                }
+                candidates.append(
+                    self._memory_suggestion_payload(
+                        candidate_key=candidate_key,
+                        candidate_type="repeated_workout_pattern",
+                        title=f"重复训练模式：{label}",
+                        statement=statement,
+                        evidence=evidence,
+                    )
+                )
+
+        candidates.sort(
+            key=lambda item: (
+                -int(item["evidence"]["evidence_count"]),
+                item["candidate_type"],
+                item["candidate_key"],
+            )
+        )
+        if daily_proposal_count >= 3:
+            candidates = []
+        else:
+            candidates = candidates[: min(validated.limit, 3 - daily_proposal_count)]
+        data = {
+            "user_id": validated.user_id,
+            "date": validated.date,
+            "window_days": validated.window_days,
+            "suggestions": candidates,
+            "daily_proposal_count": daily_proposal_count,
+            "daily_proposal_limit": 3,
+            "session_display_limit": 1,
+            "safety_advisory": (
+                "这些是基于已记录事实的长期记忆候选，不是医学结论。展示前必须让用户确认；"
+                "用户拒绝或未确认时，不得调用 memory.confirm。"
+            ),
+        }
+        return self._response(
+            f"op_read_memory_suggestions_{validated.user_id}_{version}",
+            "success",
+            data,
+            version,
+        )
+
+    @staticmethod
+    def _memory_suggestion_payload(
+        *,
+        candidate_key: str,
+        candidate_type: str,
+        title: str,
+        statement: str,
+        evidence: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build the stable payload the host can pass to memory_action.propose."""
+        return {
+            "suggestion_id": f"suggestion_{hashlib.sha256(candidate_key.encode('utf-8')).hexdigest()[:16]}",
+            "candidate_key": candidate_key,
+            "candidate_type": candidate_type,
+            "title": title,
+            "statement": statement,
+            "content": statement,
+            "evidence": evidence,
+            "source_method": "cyber-health-active-pattern",
+            "requires_user_confirmation": True,
+            "propose_payload": {
+                "candidate_key": candidate_key,
+                "candidate_type": candidate_type,
+                "title": title,
+                "statement": statement,
+                "content": statement,
+                "evidence": evidence,
+                "source_method": "cyber-health-active-pattern",
+            },
         }
 
 
