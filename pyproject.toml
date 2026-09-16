@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cyber-health-agent"
-version = "0.3.5"
+version = "0.3.6"
 description = "Local-first, host-neutral health facts and MCP tools"
 requires-python = ">=3.11"
 dependencies = ["mcp>=1.26,<2", "pydantic>=2.11,<3", "PyYAML>=6,<7", "tzdata>=2024.1"]

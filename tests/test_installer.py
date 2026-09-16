@@ -417,6 +417,14 @@ class TestCyberHealthInstaller(BaseInstallerFixture):
             with mock.patch("pathlib.Path", return_value=drive_root):
                 self.assertTrue(is_system_broad_or_drive_root(drive_root))
 
+    def test_integrity_check_closes_connection_after_sqlite_error(self) -> None:
+        fake_conn = mock.MagicMock()
+        fake_conn.cursor.return_value.execute.side_effect = sqlite3.DatabaseError("corrupt")
+        with mock.patch("cyber_health.install.sqlite3.connect", return_value=fake_conn):
+            ok, _ = verify_sqlite_integrity(self.source_db)
+        self.assertFalse(ok)
+        fake_conn.close.assert_called_once()
+
     def test_plan_openclaw_malformed_json_fails_closed(self) -> None:
         installer = CyberHealthInstaller(
             project_root=self.source_root,

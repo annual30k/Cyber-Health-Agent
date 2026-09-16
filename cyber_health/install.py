@@ -192,33 +192,39 @@ def verify_sqlite_integrity(db_file: Path) -> tuple[bool, str]:
     """Runs PRAGMA integrity_check on SQLite database."""
     if not db_file.exists() or not db_file.is_file():
         return False, "Database file does not exist or is not a regular file"
+    conn: sqlite3.Connection | None = None
     try:
         conn = sqlite3.connect(f"file:{db_file.resolve()}?mode=ro", uri=True)
         cursor = conn.cursor()
         cursor.execute("PRAGMA integrity_check;")
         rows = cursor.fetchall()
-        conn.close()
         if rows and rows[0][0] == "ok":
             return True, "ok"
         return False, f"Integrity check failed: {rows}"
     except Exception as exc:
         return False, f"SQLite integrity check exception: {exc}"
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def safe_checkpoint_db(db_file: Path) -> tuple[bool, str]:
     """Safely checkpoints SQLite WAL into main database file with TRUNCATE."""
     if not db_file.exists() or not db_file.is_file() or has_symlink_in_path(db_file):
         return False, "Database file does not exist, is not a regular file, or has symlinks"
+    conn: sqlite3.Connection | None = None
     try:
         conn = sqlite3.connect(str(db_file.resolve()))
         cursor = conn.cursor()
         rows = cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);").fetchall()
-        conn.close()
         if rows and rows[0][0] != 0:
             return False, f"WAL checkpoint busy or incomplete: {rows}"
         return True, "ok"
     except Exception as exc:
         return False, f"WAL checkpoint exception: {exc}"
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @dataclass
