@@ -140,8 +140,9 @@ class DataPreservationStatus:
     preserved_paths: list[str] = field(default_factory=list)
     purged_paths: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
-    # Metadata for TOCTOU validation: path_str -> (st_dev, st_ino, resolved_str)
-    targets_meta: dict[str, tuple[int, int, str]] = field(default_factory=dict)
+    # Metadata for TOCTOU validation:
+    # path_str -> (device, inode, size, mtime_ns, ctime_ns, resolved_path)
+    targets_meta: dict[str, tuple[int, int, int, int, int, str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -803,7 +804,14 @@ class CyberHealthUninstaller:
                 val = self.validate_purge_candidate(target)
                 st = os.lstat(val)
                 status.purged_paths.append(str(val))
-                status.targets_meta[str(val)] = (st.st_dev, st.st_ino, str(val.resolve()))
+                status.targets_meta[str(val)] = (
+                    st.st_dev,
+                    st.st_ino,
+                    st.st_size,
+                    st.st_mtime_ns,
+                    st.st_ctime_ns,
+                    str(val.resolve()),
+                )
             except Exception as exc:
                 status.errors.append(str(exc))
 
@@ -838,8 +846,15 @@ class CyberHealthUninstaller:
             # Verify device, inode, and resolved identity
             expected = data_status.targets_meta.get(target_str)
             if expected:
-                exp_dev, exp_ino, exp_resolved = expected
-                if (st.st_dev != exp_dev) or (st.st_ino != exp_ino) or (str(p.resolve()) != exp_resolved):
+                exp_dev, exp_ino, exp_size, exp_mtime_ns, exp_ctime_ns, exp_resolved = expected
+                if (
+                    st.st_dev != exp_dev
+                    or st.st_ino != exp_ino
+                    or st.st_size != exp_size
+                    or st.st_mtime_ns != exp_mtime_ns
+                    or st.st_ctime_ns != exp_ctime_ns
+                    or str(p.resolve()) != exp_resolved
+                ):
                     raise PurgeValidationError(
                         f"Target file was replaced or swapped after planning phase: {p}"
                     )
@@ -911,7 +926,14 @@ class CyberHealthUninstaller:
                     )
                 validated = self.validate_purge_candidate(target)
                 st = os.lstat(validated)
-                current = (st.st_dev, st.st_ino, str(validated.resolve()))
+                current = (
+                    st.st_dev,
+                    st.st_ino,
+                    st.st_size,
+                    st.st_mtime_ns,
+                    st.st_ctime_ns,
+                    str(validated.resolve()),
+                )
                 if current != expected:
                     raise PurgeValidationError(
                         f"Purge target changed after planning: {target}"
