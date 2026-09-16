@@ -1,4 +1,4 @@
-# Cyber Health Agent (Core & stdio MCP v0.3.7)
+# Cyber Health Agent (Core & stdio MCP v0.3.8)
 
 > Independent, pluggable deterministic health engine and stdio MCP server for AI hosts (Codex, OpenClaw, Hermes, etc.). It is not an Obsidian plugin.
 > **Current Status**: Core P0 implementation and extended domain capabilities (27 tools total: 7 P0 + 20 extended), including first-run intake, nightly fact collection, target-gap analysis, host automation declarations, next-day plan generation, cross-session wearable screenshot retention, and read-only active-memory pattern suggestions.
@@ -50,28 +50,28 @@
 
 ### First installation from GitHub Release
 
-Prerequisites: [uv](https://docs.astral.sh/uv/getting-started/installation/) and at least one supported host CLI (Codex, OpenClaw, or Hermes). Open [the latest Cyber Health Release](https://github.com/annual30k/Cyber-Health-Agent/releases/latest), download its `cyber_health_agent-*-py3-none-any.whl` and `SHA256SUMS` into the same directory, and compare the wheel's SHA-256 with its line in `SHA256SUMS` before running it. The examples below use the current `0.3.7` wheel; substitute the wheel name shown on the latest Release when a newer version is published.
+Prerequisites: [uv](https://docs.astral.sh/uv/getting-started/installation/) and at least one supported host CLI (Codex, OpenClaw, or Hermes). Open [the latest Cyber Health Release](https://github.com/annual30k/Cyber-Health-Agent/releases/latest), download its `cyber_health_agent-*-py3-none-any.whl` and `SHA256SUMS` into the same directory, and compare the wheel's SHA-256 with its line in `SHA256SUMS` before running it. The examples below use the current `0.3.8` wheel; substitute the wheel name shown on the latest Release when a newer version is published.
 
 macOS/Linux, from the directory containing the downloads:
 
 ```sh
 # macOS
-shasum -a 256 cyber_health_agent-0.3.7-py3-none-any.whl
-# Linux: use sha256sum cyber_health_agent-0.3.7-py3-none-any.whl instead
+shasum -a 256 cyber_health_agent-0.3.8-py3-none-any.whl
+# Linux: use sha256sum cyber_health_agent-0.3.8-py3-none-any.whl instead
 ```
 
 ```sh
-uvx --python 3.11 --from ./cyber_health_agent-0.3.7-py3-none-any.whl cyber-health install --dry-run --json
-uvx --python 3.11 --from ./cyber_health_agent-0.3.7-py3-none-any.whl cyber-health install --json
+uvx --python 3.11 --from ./cyber_health_agent-0.3.8-py3-none-any.whl cyber-health install --dry-run --json
+uvx --python 3.11 --from ./cyber_health_agent-0.3.8-py3-none-any.whl cyber-health install --json
 ~/.cyber-health/venv/bin/cyber-health status --json
 ```
 
 Windows PowerShell, from the directory containing the downloads:
 
 ```powershell
-Get-FileHash .\cyber_health_agent-0.3.7-py3-none-any.whl -Algorithm SHA256
-uvx --python 3.11 --from .\cyber_health_agent-0.3.7-py3-none-any.whl cyber-health install --dry-run --json
-uvx --python 3.11 --from .\cyber_health_agent-0.3.7-py3-none-any.whl cyber-health install --json
+Get-FileHash .\cyber_health_agent-0.3.8-py3-none-any.whl -Algorithm SHA256
+uvx --python 3.11 --from .\cyber_health_agent-0.3.8-py3-none-any.whl cyber-health install --dry-run --json
+uvx --python 3.11 --from .\cyber_health_agent-0.3.8-py3-none-any.whl cyber-health install --json
 & "$HOME\.cyber-health\venv\Scripts\cyber-health.exe" status --json
 ```
 
@@ -397,7 +397,7 @@ Current test suite contains **256 automated test cases** (100% passing), includi
 
 > [!IMPORTANT]
 > **Declaration of System Status & Physical Boundaries**:
-> The local Cyber Health Core engine, stdio MCP server, and host integration lifecycle have completed automated verification within the v0.3.7 scope. However, **this does not constitute production deployment or physical external integration**:
+> The local Cyber Health Core engine, stdio MCP server, and host integration lifecycle have completed automated verification within the v0.3.8 scope. However, **this does not constitute production deployment or physical external integration**:
 > 1. **Obsidian Vault / MemoryProvider: Conditional connection only**: If the install/update preflight is incomplete, or the Provider is unavailable, Cyber Health does not connect to the Vault and keeps long-term memory in deferred/outbox processing (`MEMORY_DEFERRED`). When the preflight passes and the `cyber-health` MCP registration includes the validated `--memory-provider obsidian`, `--memory-vault`, and `--memory-project-id` parameters, Cyber Health can connect to the verified `health-manager` project. No connection is implicit, and explicit provider authorization remains required.
 > 2. **Cross-Project Plugin Boundaries**: `obsidian-memory` is a separate cross-project plugin and is never modified, disabled, or removed by Cyber Health Agent tools.
 > 3. **Host Active Push Notifications: Not Registered**: Core is a headless request-response MCP server that outputs dynamic trigger conditions, suppression reasons, and tombstones. Active push notifications require a host-level scheduler or daemon (e.g. OpenClaw Cron, Launchd).
