@@ -31,6 +31,17 @@ class TestCyberHealthCLI(unittest.TestCase):
         self.assertFalse(data["installed"])
         self.assertEqual(data["version"], "not installed")
 
+    def test_package_versions_are_consistent(self) -> None:
+        """Published package, Core, and MCP adapter must report one version."""
+        from importlib.metadata import version
+
+        import cyber_health
+        import cyber_health_mcp
+
+        package_version = version("cyber-health-agent")
+        self.assertEqual(cyber_health.__version__, package_version)
+        self.assertEqual(cyber_health_mcp.__version__, package_version)
+
     def test_run_status_installed(self) -> None:
         self.target_dir.mkdir()
         cfg = self.target_dir / "config"

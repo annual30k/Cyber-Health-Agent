@@ -249,7 +249,7 @@ Run the full test suite using `unittest`:
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-Current test suite contains **223 automated test cases** across 28 test files (100% passing), including active-memory suggestion, provider bridge, installer, and updater coverage:
+Current test suite contains **224 automated test cases** across 28 test files (100% passing), including active-memory suggestion, provider bridge, installer, updater, and package-version consistency coverage:
 
 ### Part A. Codex Review & Independent Verification Suites (89 tests)
 - `tests/test_codex_review.py` (8 tests): Round 1 regressions (mandatory idempotency keys, calendar validation, range checks, repeat resolution).

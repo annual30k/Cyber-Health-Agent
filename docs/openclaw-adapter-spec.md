@@ -1,7 +1,9 @@
 # OpenClaw 适配规范（P0）
 
-**状态：** 审阅基线  
-**适用版本：** Cyber Health Core v0.1.x；OpenClaw 当前 MCP Registry 机制  
+**状态：** 当前 P0 运行契约
+
+**适用版本：** Cyber Health Core / MCP v0.2.6；OpenClaw 当前 MCP Registry 机制
+
 **范围：** 单用户、本地优先、一个共享 SQLite 事实库、OpenClaw 作为首个宿主。
 
 ## 1. 目标与边界
@@ -230,11 +232,9 @@ MCP 服务不主动推送消息。`cyber_health_get_schedule` 只返回事件与
    `projects.yaml` 声明；缺失项显示明确 warning，全部有效时 MCP 注册参数包含
    `--memory-provider obsidian`、`--memory-vault` 和 `--memory-project-id`。
 
-## 9. 实施顺序
+## 9. 运行与演进边界
 
-1. 完成 MCP transport：输入 JSON Schema、工具注册、统一错误 envelope 与 stdio 生命周期。
-2. 执行上述六项验收并保存 `doctor --probe` 输出。
-3. 接入 OpenClaw 的实际提醒机制，验证送达回写与补偿。
-4. 在宿主前置检查和 Provider 接线验收通过后，启用 Obsidian Memory 写入；Provider 不可用时保留
-   outbox 降级语义。
-5. 仅在 P0 稳定后，追加第二宿主适配。
+1. MCP transport、JSON Schema、工具注册、统一错误 envelope 与 stdio 生命周期已实现；发布前按上述九项验收清单复验。
+2. Core 只返回调度声明、触发条件与墓碑状态；实际提醒、会话搜索和送达回写仍是 OpenClaw 宿主责任。
+3. 只有宿主前置检查和 Provider 接线通过后才启用 Obsidian Memory 读写；Provider 不可用时保留 outbox 降级语义。
+4. 新宿主适配不得复制业务状态，必须继续共享 SQLite 事实源、Core Contract 和安全规则。

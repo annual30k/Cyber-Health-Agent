@@ -214,15 +214,16 @@ RAW → WIKI（稳定的个人长期健康档案）
    最终沉淀在 Obsidian Vault 中，如 [[乳清蛋白消化不良.md]]、[[深蹲代偿记录.md]]
 ```
 
-### 6.1 本地单机休眠环境下的记忆维护机制（彻底闭环）
-* **双轨触发机制**：
-  1. **随路触发（Piggybacked on Review）**：用户在完成每日复盘（`daily_review`）时，插件在后台自动检查是否有到期数据，一键执行压缩和归纳；
-  2. **启动与查询惰性检查（Lazy Pruning）**：若用户深夜休眠、关机未开，下次宿主首次唤醒调用 `cyber_health_get_today` 时，自动在后台异步补跑清理，无需 24 小时开机的后台守护进程。
+### 6.1 本地单机休眠环境下的记忆维护机制
+* **只读检查 + 宿主显式执行**：
+  1. `cyber_health_get_today` 和 `daily_review` 只读计算到期工作，返回 `maintenance_recommended`、原因、稳定维护键和建议动作，不在查询内写库或启动后台线程；
+  2. 宿主看到维护提示后显式调用 `cyber_health_maintain_memory`，以幂等、可续跑的方式处理 outbox、过期租约和 TTL 数据；
+  3. 设备休眠期间不需要常驻守护进程；下次宿主唤醒时通过同一只读检查恢复待办工作。
 * **白盒可查性**：生成的长期 Wiki 笔记保存在 Obsidian 项目的 `wiki/` 目录下，所有笔记包含双向链接（如关联到 `[[减脂执行策略]]`、`[[力量渐进周报]]`），用户可直接使用 Obsidian 打开查看和编辑。
 
 ### 6.2 Obsidian Memory 对接边界
 
-Obsidian Memory 是长期个体化记忆的核心依赖；文件投放、解析、去重、索引、Raw/Candidate/Wiki 生命周期及 Vault 写入均由 Obsidian Memory Plugin 负责，Cyber Health 不重复实现这些通用能力。用户将体检资料、训练记录或其他参考文件放入 Vault 后，由 Obsidian Memory Plugin 自行 ingest，Cyber Health 仅通过 `MemoryProvider` 接口检索和提交健康领域候选。
+Obsidian Memory 是长期个体化记忆的核心依赖。`obsidian-memory-plugin` 是 hook-only 宿主扩展，负责加载 Skill、注入规则和暴露连接配置，不是 MCP 服务或可调用 Provider。Cyber Health 只通过 `MemoryProvider` 边界访问长期记忆；当安装/更新预检查验证 Vault 与 `health-manager` 项目后，`ObsidianMemoryProvider` 才在该受限项目内执行 query/propose/action。Raw/Candidate/Wiki 生命周期仍遵循 Obsidian Memory Skill，Core 不越过 Provider 直接操作 Vault。
 
 记忆分层职责如下：
 
@@ -315,21 +316,29 @@ graph TD
 | **训练指导** | `cyber_health_get_training_plan` | 获取今日训练计划（含标准版与最低可完成版）。 | `session`, `exercises`, `minimum_plan`, `safety_notes` |
 | | `cyber_health_log_workout` | 记录训练组次、负荷、RPE 与酸痛反馈，触发渐进状态机。 | `completion_rate`, `progression_advice`, `recovery_state` |
 | | `cyber_health_complete_workout` | 极简打卡（适于用户只说“练完了”而未提供明细）。 | `status`, `missing_fields_prompt`, `next_action` |
+| | `cyber_health_confirm_training_progression` | 用户确认带证据签名的加重或加次建议，并在事务内重新校验安全状态。 | `proposal_id`, `source_record_ids`, `state_version` |
+| | `cyber_health_substitute_exercise` | 根据器械与不适保持动作模式的安全替换。 | `original_exercise`, `substitutions`, `safety_notes` |
 | **复盘与计划** | `cyber_health_daily_review` | 晚间对账复盘，输出偏差归因与次日自适应预案（Draft）。 | `summary`, `causes`, `tomorrow_draft_plan`, `action_item` |
 | | `cyber_health_plan_tomorrow` | 早晨或需要时生成/刷新次日或今日计划。 | `nutrition_plan`, `training_plan`, `commit_status` |
 | **调度与维护** | **`cyber_health_get_schedule`**<br>*(v1.1新增)* | **供宿主拉取今日待提醒事件清单与动态时间窗口。** | `events: [{event_type, window_start, window_end, hint}]` |
-| | **`cyber_health_maintain_memory`**<br>*(v1.1新增)* | **执行短期记忆到期压缩归纳与候选提炼（随路或惰性跑）。** | `pruned_records`, `consolidated_trends`, `new_candidates` |
+| | `cyber_health_schedule_daily_reminders` | 生成稳定的每日提醒事件，供宿主进行调度对账。 | `events`, `state_version` |
+| | `cyber_health_update_schedule_event` | 更新事件状态、送达结果或延后时间窗口。 | `event_id`, `status`, `revision` |
+| | `cyber_health_acknowledge_schedule_event` | 确认或跳过调度事件，避免重复触发。 | `event_id`, `status`, `revision` |
+| | **`cyber_health_maintain_memory`**<br>*(v1.1新增)* | **由宿主根据只读维护提示显式执行到期压缩、归纳与 outbox 续跑。** | `pruned_records`, `consolidated_trends`, `new_candidates` |
 | **认知与审计** | `cyber_health_memory_action` | 提议/确认将健康规律记入或删除于 Obsidian Vault。 | `candidate_id`, `status`, `target_note_path` |
+| | `cyber_health_query_memory` | 同时查询 SQLite 短期事实与经确认的长期记忆。 | `short_term_facts`, `obsidian_memories`, `warnings` |
+| | `cyber_health_get_memory_suggestions` | 只读发现跨日重复模式，返回需用户确认的候选。 | `suggestions`, `candidate_key`, `requires_user_confirmation` |
 | | `cyber_health_query_knowledge` | 查询专业循证知识包（附带证据等级与适用边界）。 | `answer`, `sources`, `limitations`, `disclaimer` |
 | | `cyber_health_get_audit_trail` | 查询事实修订、平账与操作因果链。 | `operations`, `before_version`, `after_version`, `causation_id` |
 | | `cyber_health_health_check` | 检查事实库、记忆提供者与待重试工作。 | `components`, `pending_work`, `overall_status` |
 | | `cyber_health_export_data` | 导出可迁移的用户事实与 schema 元数据。 | `format`, `export_version`, `artifact_path` |
+| | `cyber_health_import_data` | 在严格 schema 验证和原子回滚保护下导入事实快照。 | `imported_counts`, `state_version`, `warnings` |
 
 ---
 
 ### 9.2 MemoryProvider 对接接口
 
-Cyber Health 不直接访问 Vault 文件系统，而是通过可替换的 `MemoryProvider` 对接 Obsidian Memory Plugin。Obsidian Memory Plugin 负责用户投放文件的 ingest、解析、索引与长期记忆生命周期；Cyber Health 只调用以下领域无关接口：
+Cyber Health Core 不直接访问 Vault 文件系统，而是调用可替换的 `MemoryProvider`。当连接通过安装/更新预检查后，`ObsidianMemoryProvider` 将以下领域无关操作限定到已配置的 `health-manager` 项目；`obsidian-memory-plugin` 只负责宿主端 Skill 与配置接入：
 
 | Provider 操作 | 用途 | 关键约束 |
 | :--- | :--- | :--- |

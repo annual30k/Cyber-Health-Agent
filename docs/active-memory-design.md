@@ -1,6 +1,6 @@
 # Cyber Health 主动长期记忆设计
 
-**状态：** Phase 1–2 implemented in Cyber Health; feedback/maintenance remains incremental
+**状态：** 已实现；真实 Vault 读写取决于宿主预检查后的 Provider 连接
 
 **目标：** 在不破坏 `obsidian-memory` 自生长规则的前提下，让 Cyber Health 能够主动发现值得长期保留的健康偏好、约束和稳定规律。
 
@@ -114,7 +114,7 @@ Provider 不可用时，候选保留在 SQLite `memory_outbox`，返回 `MEMORY_
 
 ## 5. Cyber Health 接口设计
 
-建议增加一个纯读工具：
+已实现纯读工具：
 
 ```text
 cyber_health_get_memory_suggestions(
@@ -159,25 +159,25 @@ cyber_health_get_memory_suggestions(
 
 晚间日报不得等待长期记忆候选完成；日报的生成仍以 SQLite 当日事实为准。
 
-## 7. 分阶段实现
+## 7. 已实现组件
 
-### Phase 1：Agent 触发策略
+### Agent 触发策略
 
-- 在 Cyber Health MCP host instructions 中加入直接触发、模式提议和禁止触发规则。
-- 明确 `propose` 与 `confirm` 的区别。
-- 为主动候选设置会话/日期上限。
+- Cyber Health MCP host instructions 已包含直接触发、模式提议和禁止触发规则。
+- `propose` 与 `confirm` 的授权边界已明确。
+- 主动候选已设置会话/日期上限。
 
-### Phase 2：确定性建议引擎
+### 确定性建议引擎
 
-- 实现 `cyber_health_get_memory_suggestions`。
-- 加入饮食、训练和时间模式的证据聚合。
-- 添加候选 key、证据窗口、去重和不同日期约束。
+- 已实现 `cyber_health_get_memory_suggestions`。
+- 已加入饮食、训练和时间模式的证据聚合。
+- 已加入候选 key、证据窗口、去重和不同日期约束。
 
-### Phase 3：反馈和运维
+### 反馈和运维
 
-- 记录用户拒绝/确认的候选反馈。
-- 在 `health_check` 和 `maintain_memory` 中报告候选和 outbox 状态。
-- 增加跨会话、重复候选、Provider 不可用和部分摄入恢复测试。
+- 已记录用户拒绝/确认的候选反馈与冷却状态。
+- `health_check` 和 `maintain_memory` 已报告候选及 outbox 状态。
+- 已覆盖跨会话、重复候选、Provider 不可用和部分摄入恢复测试。
 
 ## 8. 当前实现
 
