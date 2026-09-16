@@ -26,6 +26,7 @@ from cyber_health.install import (
     main,
     verify_sqlite_integrity,
 )
+from cyber_health.core_release import CoreRelease
 
 
 class BaseInstallerFixture(unittest.TestCase):
@@ -131,6 +132,27 @@ sys.exit(0)
 
 
 class TestCyberHealthInstaller(BaseInstallerFixture):
+    def test_release_mode_plans_verified_core_wheel_without_source_checkout(self) -> None:
+        release = CoreRelease(
+            version="0.3.0",
+            wheel_name="cyber_health_agent-0.3.0-py3-none-any.whl",
+            wheel_url="https://github.com/annual30k/cyber-health-agent/releases/download/v0.3.0/cyber_health_agent-0.3.0-py3-none-any.whl",
+            sha256="a" * 64,
+            release_url="https://github.com/annual30k/cyber-health-agent/releases/tag/v0.3.0",
+        )
+        installer = CyberHealthInstaller(
+            target_dir=self.target_dir,
+            openclaw_bin=None,
+            codex_bin=None,
+            hermes_bin=None,
+            dry_run=True,
+            core_release_resolver=lambda: release,
+        )
+        report = installer.run()
+        self.assertTrue(report.success)
+        self.assertEqual(report.core_release.action, "planned")
+        self.assertEqual(report.core_release.version, "0.3.0")
+
     def test_safety_boundary_rejection(self) -> None:
         # Broad system path rejected
         with self.assertRaises(SafetyBoundaryError):
@@ -237,6 +259,35 @@ class TestCyberHealthInstaller(BaseInstallerFixture):
         self.assertTrue(report.success)
         self.assertTrue(report.dry_run)
         self.assertFalse(self.target_dir.exists())
+
+    def test_hermes_only_memory_plan_leaves_public_plugin_to_its_native_installer(self) -> None:
+        vault = self.test_dir / "Vault"
+        vault.mkdir()
+        obsidian_app = self.test_dir / "Obsidian.app"
+        obsidian_app.mkdir()
+        hermes_home = self.test_dir / ".hermes"
+        installer = CyberHealthInstaller(
+            project_root=self.source_root,
+            target_dir=self.target_dir,
+            openclaw_bin=None,
+            codex_bin=None,
+            hermes_bin="/usr/bin/true",
+            hermes_home=hermes_home,
+            memory_vault=vault,
+            dry_run=True,
+        )
+        installer.memory_bootstrapper.obsidian_application_finder = lambda: obsidian_app
+
+        report = installer.run()
+
+        self.assertTrue(report.success)
+        self.assertEqual(report.memory.state, "planned")
+        self.assertEqual(report.memory_bootstrap.plugin_action, "skip")
+        self.assertEqual(report.memory_plugin.action, "skipped")
+        self.assertIn("native plugin installer", report.memory_plugin.reason)
+        self.assertIn("--memory-provider", report.hermes.args)
+        self.assertFalse(vault.joinpath("00-System").exists())
+        self.assertFalse(hermes_home.exists())
 
     def test_execute_data_migration_checksum_verified(self) -> None:
         installer = CyberHealthInstaller(

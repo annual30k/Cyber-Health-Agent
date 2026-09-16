@@ -45,6 +45,13 @@ from .hermes_integration import (
     find_hermes_cli,
     plan_hermes_registration,
 )
+from .memory_plugin_release import (
+    MemoryPluginReleaseError,
+    MemoryPluginReleaseStatus,
+    cache_memory_plugin_release,
+    resolve_latest_memory_plugin_release,
+)
+from .core_release import CoreReleaseError, CoreReleaseStatus, cache_core_release, resolve_latest_core_release
 
 _DEFAULT_BIN = object()
 
@@ -75,6 +82,8 @@ class UpdateReport:
     new_version: str
     backup: BackupStatus
     memory: HealthManagerMemoryStatus = field(default_factory=HealthManagerMemoryStatus)
+    core_release: CoreReleaseStatus = field(default_factory=CoreReleaseStatus)
+    memory_plugin: MemoryPluginReleaseStatus = field(default_factory=MemoryPluginReleaseStatus)
     package_updated: bool = False
     schema_verified: bool = False
     openclaw_verified: bool = False
@@ -106,7 +115,10 @@ class CyberHealthUpdater:
         hermes_home: Path | str | None = None,
         dry_run: bool = False,
         use_uv: bool = True,
+        memory_plugin_release_resolver=resolve_latest_memory_plugin_release,
+        core_release_resolver=resolve_latest_core_release,
     ):
+        self.release_mode = project_root is None
         if project_root is None:
             self._raw_project_root = Path(__file__).resolve().parents[1]
         else:
@@ -132,6 +144,8 @@ class CyberHealthUpdater:
         self.data_dir = self.target_dir / "data"
         self.backups_dir = self.data_dir / "backups"
         self.config_dir = self.target_dir / "config"
+        self.plugins_dir = self.target_dir / "plugins"
+        self.releases_dir = self.target_dir / "releases"
         self.target_db_path = self.data_dir / "cyber-health.sqlite3"
 
         if openclaw_bin is _DEFAULT_BIN:
@@ -155,6 +169,11 @@ class CyberHealthUpdater:
         self.use_uv = use_uv
         self.new_version = self._detect_source_version()
         self.memory_status = HealthManagerMemoryStatus()
+        self.memory_plugin_release_resolver = memory_plugin_release_resolver
+        self.core_release_resolver = core_release_resolver
+        self.core_release_status = CoreReleaseStatus()
+        self.core_release = None
+        self.memory_plugin_status = MemoryPluginReleaseStatus()
 
     def _validate_target_dir(self, target: Path) -> None:
         if is_system_broad_or_drive_root(target):
@@ -177,6 +196,16 @@ class CyberHealthUpdater:
                     if len(parts) == 2:
                         return parts[1].strip().strip('"').strip("'")
         return "0.2.6"
+
+    def prepare_core_release(self) -> CoreReleaseStatus:
+        if not self.release_mode:
+            return CoreReleaseStatus(action="local", version=self.new_version, reason="Using the explicit local development source.")
+        try:
+            self.core_release = self.core_release_resolver()
+            self.new_version = self.core_release.version
+            return CoreReleaseStatus("planned", self.core_release.version, str(self.releases_dir / self.core_release.wheel_name), self.core_release.sha256, "Resolved the latest stable Core Release.")
+        except CoreReleaseError as exc:
+            return CoreReleaseStatus(action="error", reason=str(exc))
 
     def get_openclaw_env(self) -> dict[str, str]:
         env = dict(os.environ)
@@ -204,6 +233,44 @@ class CyberHealthUpdater:
             "target_dir": str(self.target_dir),
             "db_path": str(self.target_db_path),
         }
+
+    @staticmethod
+    def memory_from_installation_metadata(metadata: dict[str, Any]) -> HealthManagerMemoryStatus:
+        """Revalidate a previously consented host-neutral Vault binding.
+
+        Updates have no ``--memory-vault`` prompt. They may therefore reuse only
+        the explicit binding recorded by a successful installation, and only
+        after the filesystem provider validates its current scope.
+        """
+        raw = metadata.get("memory")
+        if not isinstance(raw, dict) or raw.get("state") != "connected":
+            return HealthManagerMemoryStatus(reason="No previously connected long-term memory binding was recorded.")
+        vault_path = raw.get("vault_path")
+        project_id = raw.get("project_id")
+        if not isinstance(vault_path, str) or not isinstance(project_id, str):
+            return HealthManagerMemoryStatus(reason="Recorded long-term memory binding is incomplete.")
+        try:
+            provider = ObsidianMemoryProvider(vault_path, project_id)
+        except Exception as exc:
+            return HealthManagerMemoryStatus(
+                state="invalid",
+                vault_path=vault_path,
+                project_id=project_id,
+                reason=f"Recorded long-term memory binding no longer validates: {exc}",
+            )
+        return HealthManagerMemoryStatus(
+            state="connected",
+            plugin_loaded=False,
+            vault_path=str(provider.vault_path),
+            project_id=provider.project_id,
+            project_path=str(provider.project_path),
+            provider_args=[
+                "--memory-provider", "obsidian",
+                "--memory-vault", str(provider.vault_path),
+                "--memory-project-id", provider.project_id,
+            ],
+            reason="Revalidated the previously consented Vault/project connection from installation metadata.",
+        )
 
     def create_database_snapshot(self) -> BackupStatus:
         """Creates a timestamped snapshot of current production database with SHA256 and integrity check."""
@@ -286,7 +353,7 @@ class CyberHealthUpdater:
         return status
 
     def upgrade_package(self) -> bool:
-        """Upgrades the package in target venv using the source repository."""
+        """Upgrades from a verified Core wheel, or explicit local dev source."""
         if self.dry_run:
             return True
 
@@ -296,10 +363,17 @@ class CyberHealthUpdater:
         if not venv_python.exists():
             raise UpdaterError(f"Virtual environment python executable not found: {venv_python}")
 
+        package_source: Path = self.project_root
+        if self.release_mode:
+            if self.core_release is None:
+                raise UpdaterError("Core Release was not resolved before upgrade.")
+            status = cache_core_release(self.core_release, self.releases_dir)
+            self.core_release_status = status
+            package_source = Path(status.wheel_path)
         if uv_bin:
-            cmd = [uv_bin, "pip", "install", "--upgrade", str(self.project_root), "--python", str(venv_python)]
+            cmd = [uv_bin, "pip", "install", "--upgrade", str(package_source), "--python", str(venv_python)]
         else:
-            cmd = [str(venv_python), "-m", "pip", "install", "--upgrade", str(self.project_root)]
+            cmd = [str(venv_python), "-m", "pip", "install", "--upgrade", str(package_source)]
 
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if res.returncode != 0:
@@ -488,6 +562,36 @@ class CyberHealthUpdater:
         except Exception:
             return False
 
+    def update_memory_plugin(self, metadata: dict[str, Any]) -> MemoryPluginReleaseStatus:
+        """Refresh only an OpenClaw plugin release previously managed by Core."""
+        prior = metadata.get("memory_plugin")
+        if not self.openclaw_bin or not isinstance(prior, dict) or prior.get("action") not in {"downloaded", "reused"}:
+            return MemoryPluginReleaseStatus(reason="No Cyber Health-managed OpenClaw plugin Release to update.")
+        try:
+            release = self.memory_plugin_release_resolver()
+            archive_path = self.plugins_dir / release.archive_name
+            if prior.get("version") == release.version and prior.get("sha256") == release.sha256:
+                return MemoryPluginReleaseStatus(
+                    action="reused", version=release.version, archive_path=str(archive_path), sha256=release.sha256,
+                    reason="The installed plugin Release is already the latest stable verified version.",
+                )
+            if self.dry_run:
+                return MemoryPluginReleaseStatus(
+                    action="planned", version=release.version, archive_path=str(archive_path), sha256=release.sha256,
+                    reason="Resolved the latest stable plugin Release; dry run will not install it.",
+                )
+            status = cache_memory_plugin_release(release, self.plugins_dir)
+            result = subprocess.run(
+                [self.openclaw_bin, "plugins", "install", status.archive_path, "--force", "--accept-capabilities", "--acknowledge-install-policy-warning"],
+                env=self.get_openclaw_env(), capture_output=True, text=True, timeout=45, shell=False,
+            )
+            if result.returncode != 0:
+                raise UpdaterError(f"OpenClaw could not update obsidian-memory-plugin: {result.stderr.strip()}")
+            status.reason = "Installed the latest SHA-256-verified plugin Release through OpenClaw."
+            return status
+        except MemoryPluginReleaseError as exc:
+            return MemoryPluginReleaseStatus(action="error", reason=str(exc))
+
     def update_metadata(self, old_meta: dict[str, Any], backup_status: BackupStatus) -> None:
         """Updates config/installation.json with new version details."""
         if self.dry_run:
@@ -498,6 +602,8 @@ class CyberHealthUpdater:
         if backup_status.backup_file:
             old_meta["last_backup"] = backup_status.backup_file
         old_meta["memory"] = self.memory_status.to_dict()
+        old_meta["core_release"] = self.core_release_status.to_dict()
+        old_meta["memory_plugin"] = self.memory_plugin_status.to_dict()
         old_meta["codex"] = {
             "name": "cyber-health",
             "registered": bool(self.codex_bin),
@@ -514,20 +620,38 @@ class CyberHealthUpdater:
         old_meta = self.inspect_installation()
         old_version = old_meta.get("version", "unknown")
         backup_status = BackupStatus(source_db=str(self.target_db_path))
-        if self.openclaw_bin:
+        self.core_release_status = self.prepare_core_release()
+        recorded_memory = self.memory_from_installation_metadata(old_meta)
+        if recorded_memory.connected:
+            self.memory_status = recorded_memory
+        elif self.openclaw_bin:
             self.memory_status = inspect_health_manager_memory(
                 self.openclaw_bin,
                 self.get_openclaw_env(),
             )
         else:
-            self.memory_status = HealthManagerMemoryStatus(
-                reason="OpenClaw executable was not found; health-manager long-term memory was not inspected.",
-                warnings=["OpenClaw executable was not found; health-manager long-term memory was not inspected."],
-            )
+            self.memory_status = recorded_memory
 
         try:
+            if self.core_release_status.action == "error":
+                return UpdateReport(dry_run=self.dry_run, success=False, target_dir=str(self.target_dir), old_version=old_version, new_version=self.new_version, backup=backup_status, memory=self.memory_status, core_release=self.core_release_status, message=f"Core Release update failed: {self.core_release_status.reason}")
             backup_status = self.create_database_snapshot()
             pkg_updated = self.upgrade_package()
+            self.memory_plugin_status = self.update_memory_plugin(old_meta)
+            if self.memory_plugin_status.action == "error":
+                return UpdateReport(
+                    dry_run=self.dry_run,
+                    success=False,
+                    target_dir=str(self.target_dir),
+                    old_version=old_version,
+                    new_version=self.new_version,
+                    backup=backup_status,
+                    memory=self.memory_status,
+                    core_release=self.core_release_status,
+                    memory_plugin=self.memory_plugin_status,
+                    package_updated=pkg_updated,
+                    message=f"Memory plugin Release update failed: {self.memory_plugin_status.reason}",
+                )
 
             schema_ok = self.verify_schema_and_service()
             if not schema_ok:
@@ -539,6 +663,8 @@ class CyberHealthUpdater:
                     new_version=self.new_version,
                     backup=backup_status,
                     memory=self.memory_status,
+                    core_release=self.core_release_status,
+                    memory_plugin=self.memory_plugin_status,
                     package_updated=pkg_updated,
                     schema_verified=False,
                     openclaw_verified=False,
@@ -559,6 +685,8 @@ class CyberHealthUpdater:
                     new_version=self.new_version,
                     backup=backup_status,
                     memory=self.memory_status,
+                    core_release=self.core_release_status,
+                    memory_plugin=self.memory_plugin_status,
                     package_updated=pkg_updated,
                     schema_verified=schema_ok,
                     openclaw_verified=False,
@@ -579,6 +707,8 @@ class CyberHealthUpdater:
                     new_version=self.new_version,
                     backup=backup_status,
                     memory=self.memory_status,
+                    core_release=self.core_release_status,
+                    memory_plugin=self.memory_plugin_status,
                     package_updated=pkg_updated,
                     schema_verified=schema_ok,
                     openclaw_verified=True,
@@ -600,6 +730,7 @@ class CyberHealthUpdater:
                     new_version=self.new_version,
                     backup=backup_status,
                     memory=self.memory_status,
+                    memory_plugin=self.memory_plugin_status,
                     package_updated=pkg_updated,
                     schema_verified=schema_ok,
                     openclaw_verified=True,
@@ -622,6 +753,8 @@ class CyberHealthUpdater:
                 new_version=self.new_version,
                 backup=backup_status,
                 memory=self.memory_status,
+                core_release=self.core_release_status,
+                memory_plugin=self.memory_plugin_status,
                 package_updated=pkg_updated,
                 schema_verified=True,
                 openclaw_verified=True,
@@ -638,6 +771,8 @@ class CyberHealthUpdater:
                 new_version=self.new_version,
                 backup=backup_status if backup_status.created else BackupStatus(reason=f"Update failed: {exc}"),
                 memory=self.memory_status,
+                core_release=self.core_release_status,
+                memory_plugin=self.memory_plugin_status,
                 message=str(exc),
             )
 
@@ -722,6 +857,13 @@ def format_text_report(report: UpdateReport) -> str:
         f"OpenClaw Verified: {report.openclaw_verified}",
         f"Codex Verified   : {report.codex_verified}",
         f"Hermes Verified  : {report.hermes_verified}",
+        "",
+        "--- Cyber Health Core Release ---",
+        f"Action           : {report.core_release.action}",
+        f"Version          : {report.core_release.version or 'N/A'}",
+        f"Wheel            : {report.core_release.wheel_path or 'N/A'}",
+        f"SHA-256          : {report.core_release.sha256 or 'N/A'}",
+        f"Reason           : {report.core_release.reason}",
         "",
         "--- Health-Manager Long-Term Memory ---",
         f"State            : {report.memory.state}",

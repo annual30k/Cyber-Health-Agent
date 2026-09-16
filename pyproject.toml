@@ -4,10 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cyber-health-agent"
-version = "0.2.9"
+version = "0.3.0"
 description = "Local-first, host-neutral health facts and MCP tools"
 requires-python = ">=3.11"
 dependencies = ["mcp>=1.26,<2", "pydantic>=2.11,<3", "PyYAML>=6,<7"]
+
+[project.urls]
+Homepage = "https://github.com/annual30k/cyber-health-agent"
+Repository = "https://github.com/annual30k/cyber-health-agent"
+Issues = "https://github.com/annual30k/cyber-health-agent/issues"
 
 [project.scripts]
 cyber-health = "cyber_health.cli:main"
@@ -18,6 +23,3 @@ cyber-health-uninstall = "cyber_health.uninstall:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["cyber_health", "cyber_health_mcp"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"obsidian-memory-plugin/obsidian-memory-plugin-0.3.2.tgz" = "cyber_health/assets/obsidian-memory-plugin-0.3.2.tgz"

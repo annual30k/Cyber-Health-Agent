@@ -1,9 +1,9 @@
 """Explicit, fail-closed first-run bootstrap for Cyber Health long-term memory.
 
 The user opts in by supplying one physical Obsidian Vault path.  This module
-only creates Cyber Health's missing project unit and merges its one OpenClaw
-agent connection.  It never discovers a Vault, rewrites another project's
-binding, or reads notes outside the managed paths.
+only creates Cyber Health's missing project unit. When OpenClaw is present it
+also merges its one OpenClaw agent connection. It never discovers a Vault,
+rewrites another project's binding, or reads notes outside the managed paths.
 """
 
 from __future__ import annotations
@@ -159,6 +159,7 @@ class MemoryBootstrapper:
         openclaw_bin: str | None,
         openclaw_env: dict[str, str],
         plugin_archive: Path,
+        plugin_archive_available: bool = True,
         project_id: str | None = None,
         dry_run: bool = False,
         obsidian_application_finder: Callable[[], Path | None] = find_obsidian_application,
@@ -169,6 +170,7 @@ class MemoryBootstrapper:
         self.openclaw_bin = openclaw_bin
         self.openclaw_env = dict(openclaw_env)
         self.plugin_archive = plugin_archive
+        self.plugin_archive_available = plugin_archive_available
         self.requested_project_id = project_id
         self.dry_run = dry_run
         self.obsidian_application_finder = obsidian_application_finder
@@ -382,14 +384,18 @@ class MemoryBootstrapper:
         if not self.requested:
             status.reason = "Memory bootstrap was not requested"
             return status
-        if not self.openclaw_bin:
-            status.reason = "OpenClaw is required to configure the opted-in Obsidian Memory connection"
-            status.plugin_action = status.config_action = "error"
-            return status
         if not self._validate_vault(status):
             status.vault_action = "error"
             return status
         if not self._validate_obsidian_application(status):
+            return status
+        if not self.openclaw_bin:
+            if not self._plan_project(status, None):
+                status.vault_action = "error"
+                return status
+            status.plugin_action = status.config_action = "skip"
+            status.state_fingerprint = self._projects_fingerprint
+            status.reason = "Memory bootstrap plan validated without OpenClaw plugin configuration"
             return status
         installed, plugin_error = self._plugin_installed()
         if plugin_error:
@@ -397,8 +403,8 @@ class MemoryBootstrapper:
             status.plugin_action = "error"
             return status
         status.plugin_action = "verify" if installed else "install"
-        if not installed and (not self.plugin_archive.is_file() or self.plugin_archive.is_symlink()):
-            status.reason = "Bundled obsidian-memory-plugin archive is unavailable"
+        if not installed and (not self.plugin_archive_available or (not self.dry_run and (not self.plugin_archive.is_file() or self.plugin_archive.is_symlink()))):
+            status.reason = "Verified obsidian-memory-plugin Release archive is unavailable"
             status.plugin_action = "error"
             return status
         entry, absent, entry_error = self._read_plugin_entry()
@@ -490,7 +496,7 @@ class MemoryBootstrapper:
                 ]
             )
             if code != 0:
-                raise MemoryBootstrapError("OpenClaw could not install bundled obsidian-memory-plugin")
+                raise MemoryBootstrapError("OpenClaw could not install the verified obsidian-memory-plugin Release")
         current, absent, error = self._read_plugin_entry()
         if error:
             raise MemoryBootstrapError(error)
@@ -565,6 +571,21 @@ class MemoryBootstrapper:
             )
         self._write_project_registry(status)
         self._write_project_unit(status)
+        if not self.openclaw_bin:
+            status.executed = True
+            status.reason = "Memory bootstrap completed without OpenClaw plugin configuration"
+            return HealthManagerMemoryStatus(
+                state="connected",
+                plugin_loaded=False,
+                vault_path=status.vault_path,
+                project_id=status.project_id,
+                project_path=status.project_path,
+                provider_args=[
+                    "--memory-provider", "obsidian", "--memory-vault", status.vault_path or "",
+                    "--memory-project-id", status.project_id or "",
+                ],
+                reason="Cyber Health Vault/project boundary verified without OpenClaw.",
+            )
         self._configure_plugin(status)
         verified = inspect_health_manager_memory(self.openclaw_bin, self.openclaw_env)
         if not verified.connected:

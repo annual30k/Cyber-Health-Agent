@@ -22,16 +22,16 @@ Vault、修改其配置或把健康记录说成已写入长期记忆。安装后
 | Cyber Health MCP 自动注册 | 是 | 是 | 是 |
 | Cyber Health SQLite 健康记录 | 是 | 是 | 是 |
 | MCP 使用已验证的 Obsidian 长期记忆 | 是 | 是 | 是 |
-| `obsidian-memory-plugin` 原生加载入口 | 是 | 是 | 否 |
-| 当前自动安装/配置公共记忆插件 | 是 | 否 | 否 |
+| `obsidian-memory-plugin` 的宿主原生加载入口 | 是 | 是 | 是 |
+| 当前自动安装/配置公共记忆能力 | 是（已校验 Release） | 否 | 否 |
 
 表中“自动注册”以对应 CLI 可用、同名 MCP 条目没有归属冲突为前提；缺少一个宿主 CLI 只跳过该宿主，
 不表示其他宿主安装失败。
 
 “MCP 使用长期记忆”指 Cyber Health 的 `ObsidianMemoryProvider` 仅读写其受限项目单元；它不把
-公共插件当作数据库或 MCP Server。Hermes 当前没有公共记忆插件的 manifest，因此 Agent 不得声称
-Hermes 已加载该插件。对于只有 Codex 或 Hermes、没有 OpenClaw 的环境，当前安装器可注册 Cyber
-Health MCP，但不能完成公共插件的自动长期记忆引导；必须明确报告这个限制，不能伪造已连接状态。
+公共插件当作数据库或 MCP Server。对于 OpenClaw，安装器只接受 GitHub 正式 Release 中带 SHA-256
+校验的 tgz，并缓存到 Cyber Health 的安装目录。对于 Codex 和 Hermes，插件由其自身的原生安装流程
+管理；Cyber Health 不复制、解压或维护它。不能伪造已连接状态。
 
 ## 标准流程
 
@@ -46,6 +46,10 @@ Health MCP，但不能完成公共插件的自动长期记忆引导；必须明�
 cyber-health install --json
 ```
 
+面向其他用户时，`cyber-health` 本体也必须来自已发布的 Core Release wheel；安装器会验证
+Release 标签、wheel 文件名和 SHA-256，随后缓存到 `~/.cyber-health/releases/`。不得让用户依赖
+本地源码目录或 Git 分支。`--project-root` 仅用于明确的开发调试。
+
 这会安装本地 Cyber Health Core，并为发现到的宿主登记 MCP。没有长期记忆授权时，不安装、禁用、
 更新或配置 `obsidian-memory-plugin`。
 
@@ -53,9 +57,11 @@ cyber-health install --json
 
 使用以下含义完整的确认，而不是把插件、Vault 和模型处理拆成多次模糊提问：
 
-> 是否启用长期记忆？启用后，Cyber Health 会在你选择的 Obsidian Vault 内创建独立的私有项目目录，
-> 并在 OpenClaw 存在时安装或复用公共 `obsidian-memory-plugin`。Vault 中被读取的内容可能会进入当前
-> Agent 的模型上下文；不会读取或改写其他项目。若同意，请提供 Vault 的绝对路径。
+> 是否启用长期记忆？启用后，Cyber Health 会在你选择的 Obsidian Vault 内创建独立的私有项目目录；
+> OpenClaw 存在时会下载并校验最新正式版公共 `obsidian-memory-plugin`；Codex 与 Hermes 的公共插件
+> 按该插件自身的宿主说明安装。
+> Vault 中被读取的内容可能会进入当前 Agent 的模型上下文；不会读取或改写其他项目。若同意，请提供
+> Vault 的绝对路径。
 
 用户拒绝或暂不决定时，执行普通模式并说明：健康记录仍安全保存在本机 SQLite；长期记忆写入将显示为
 `MEMORY_DEFERRED`，而不是“已保存”。
@@ -74,8 +80,9 @@ cyber-health install --json
 
 4. 若结果为 `memory_bootstrap.obsidian_action: "install-required"`，仅报告需要安装 Obsidian；此时
    Vault、插件和宿主配置均应保持不变。
-5. 若 dry-run 表示 OpenClaw 不可用，报告“公共记忆插件的自动引导暂不支持此环境”，并让用户选择：
-   继续安装没有长期记忆的 Cyber Health，或先安装/启用 OpenClaw。不要把这两种结果混为“已连接”。
+5. 若 OpenClaw 不可用，仍可初始化 Cyber Health 的受限 Vault 项目并让 MCP 使用它；Codex 与 Hermes
+   的通用插件仍需按其 [独立 README](https://github.com/annual30k/obsidian-memory-plugin) 手动安装，
+   不得声称该插件已配置。
 
 ### 4. 执行、验证与收据
 
@@ -88,8 +95,9 @@ cyber-health install --memory-vault "/absolute/path/to/Vault" --json
 成功时，Agent 必须逐项验证并向用户给出简短收据：
 
 - Obsidian 已发现；
-- 公共插件是“已复用”或“刚安装”（仅 OpenClaw）；
-- `agentConfigs.health-manager` 指向用户选择的 Vault；
+- OpenClaw 公共插件是“已复用”或“刚安装”（如 OpenClaw 可用）；
+- Hermes 公共插件按其原生安装说明另行管理（如 Hermes 可用）；
+- OpenClaw 的 `agentConfigs.health-manager` 指向用户选择的 Vault（如 OpenClaw 可用）；
 - Cyber Health 仅拥有 `20-Projects/Cyber-Health-Agent-<stable-id>/`；
 - `projects.yaml` 只新增该私有项目（不存在时只创建包含该项目的最小 registry）；
 - 已注册的 MCP 宿主及长期记忆状态。
@@ -117,9 +125,10 @@ Vault/
 
 - **Codex**：Cyber Health MCP 可以自动注册。公共插件拥有 Codex manifest，但当前 Cyber Health
   安装器不会代替用户安装或持久化 Codex 的 Vault 连接；如果用户要求该通用插件在 Codex 中工作，按
-  [插件 README](../obsidian-memory-plugin/README.md#codex-本地安装与启用) 的宿主流程单独确认并执行。
-- **Hermes**：Cyber Health MCP 可以自动注册和验证工具发现；Hermes 目前没有
-  `obsidian-memory-plugin` 的原生加载入口。不得把 MCP 的长期记忆能力描述为 Hermes 已安装通用插件。
+  [插件 README](https://github.com/annual30k/obsidian-memory-plugin#codex) 的宿主流程单独确认并执行。
+- **Hermes**：Cyber Health MCP 可以自动注册和验证工具发现。公共插件必须按
+  [插件 README](https://github.com/annual30k/obsidian-memory-plugin#hermes) 的 Hermes 原生流程安装；
+  Cyber Health 不写入 `$HERMES_HOME`、不覆盖 Skill，也不写入其环境变量。
 - **OpenClaw**：在用户已同意长期记忆、Obsidian 与 Vault 均通过检查后，安装器可安装缺失插件，并仅
   合并 `health-manager` 的 `agentConfigs` 条目及必要 Hook 权限。
 
@@ -131,7 +140,8 @@ Vault/
 | `install-required` | “尚未改动 Vault 或插件。请先安装 Obsidian，然后重新选择这个 Vault。” |
 | `MEMORY_DEFERRED` | “健康记录已保存到本机；长期记忆暂未同步，之后可修复连接并重试。” |
 | 外部插件配置冲突 | “检测到已有不同的长期记忆绑定；为保护现有项目，我没有修改它。” |
-| OpenClaw 不可用 | “MCP 可继续安装，但公共记忆插件的自动配置需要 OpenClaw。” |
+| OpenClaw 不可用、Hermes 可用 | “Vault 项目已配置；Hermes 公共插件请按其原生安装说明单独配置。” |
+| OpenClaw 与 Hermes 都不可用 | “Vault 项目可供 Cyber Health MCP 使用；Codex 的通用插件仍需手动安装。” |
 
 不要说“已经保存到 Obsidian”“长期记忆已连接”或“已经配置所有 Agent”，除非对应的验证结果明确为
 成功。
@@ -139,6 +149,6 @@ Vault/
 ## 文档优先级
 
 本文件定义新用户安装与确认流程。实现与参数以 [主 README](../README.md) 为准；公共插件自身的
-宿主安装、Skill 规则和手动排障以 [插件 README](../obsidian-memory-plugin/README.md) 为准；
+宿主安装、Skill 规则和手动排障以 [插件 README](https://github.com/annual30k/obsidian-memory-plugin) 为准；
 OpenClaw 的低层契约以 [适配规范](openclaw-adapter-spec.md) 为准。三者冲突时，不擅自扩展写入权限，
 而是停止并报告不一致。

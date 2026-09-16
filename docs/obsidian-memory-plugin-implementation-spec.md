@@ -1,18 +1,19 @@
 # Obsidian Memory Plugin：Skill 插件化实施说明
 
-> 对应插件版本：0.3.2  
-> 支持宿主：OpenClaw、Codex  
+> 对应插件仓库：[annual30k/obsidian-memory-plugin](https://github.com/annual30k/obsidian-memory-plugin)
+> 支持宿主：OpenClaw、Codex、Hermes
 > 范围：将已有 obsidian-memory Skill 内置到插件；Obsidian 操作技能由宿主独立安装。
 
 ## 1. 已确认的产品形态
 
-本插件的核心是项目中原有的 Obsidian Memory Skill，不另建记忆系统，采用**双宿主一体化（Dual-Host Unified）**设计：
+本插件的核心是项目中原有的 Obsidian Memory Skill，不另建记忆系统，采用**多宿主一体化**设计：
 
 ```text
-宿主插件 (OpenClaw / Codex)
+宿主插件 / Skill 适配 (OpenClaw / Codex / Hermes)
   ├── 内置 obsidian-memory Skill：自生长规则与工作流（100% 共享）
   ├── OpenClaw 适配层：openclaw.plugin.json、Hook 注入 (index.js, lib/)
-  └── Codex 适配层：.codex-plugin/plugin.json、仓库级 marketplace (.agents/)
+  ├── Codex 适配层：.codex-plugin/plugin.json、仓库级 marketplace (.agents/)
+  └── Hermes 适配层：通过 Hermes 原生插件安装流程加载
              ↓
 宿主独立安装完整 kepano/obsidian-skills 套件（运行时按需加载）
              ↓
@@ -33,7 +34,7 @@ Obsidian CLI → Obsidian 应用（仅应用专属操作）
 
 ## 2. 当前文件与职责
 
-实现位于 [obsidian-memory-plugin](../obsidian-memory-plugin/README.md)：
+实现位于独立仓库 [obsidian-memory-plugin](https://github.com/annual30k/obsidian-memory-plugin)：
 
 ```text
 obsidian-memory-plugin/
@@ -64,7 +65,7 @@ obsidian-memory-plugin/
 
 | 模块 | 职责 |
 | --- | --- |
-| package/manifests | 让 OpenClaw 与 Codex 分别识别原生插件清单与内置 Skill 目录 |
+| package/manifests / Hermes adapter | 让 OpenClaw、Codex 与 Hermes 分别识别各自的原生插件入口 |
 | .codex-plugin | 符合 Codex 官方校验器标准规范的插件元数据与接口声明 |
 | index.js | 注册 before_prompt_build，限定配置的 agentId |
 | config.js | 校验连接字段，拒绝相对路径、非法 ID、不完整配置 |
@@ -127,14 +128,14 @@ projectId 与 projectRoot 是否对应相同项目由 Agent 连接时检查 proj
 
 配置合并到 plugins.entries.obsidian-memory-plugin.config；Hook 权限单独放在
 同一插件 entry 的 hooks 下。完整示例见
-[安装配置](../obsidian-memory-plugin/examples/openclaw.config.json)。
+[安装配置](https://github.com/annual30k/obsidian-memory-plugin)。
 
 如宿主已有 plugins.allow，追加插件 ID，保留其他成员。不得覆盖原配置，
 不得修改 memory 插槽或自动禁用现有记忆系统。
 
 ## 5. 加载与依赖流程
 
-1. OpenClaw 从 manifest 加载本包的 skills 目录。
+1. OpenClaw、Codex 与 Hermes 分别通过各自原生插件入口加载本包的 skills 目录；Cyber Health 不复制或解压该目录。
 2. 对配置的 agentId，Hook 添加短入口提示和连接元数据。
 3. 当前 Agent 读取本包 obsidian-memory/SKILL.md。
 4. 配置/安装时核对上游完整套件；使用时只加载相关技能：Markdown 编写笔记、
@@ -180,7 +181,7 @@ Raw 不可变是工作流约定，不是文件系统 WORM。一次整理部分�
 
 ## 7. 安装与验证
 
-具体步骤和命令见 [插件 README](../obsidian-memory-plugin/README.md)。
+具体步骤和命令见 [插件 README](https://github.com/annual30k/obsidian-memory-plugin)。
 
 开发验证：
 
@@ -189,12 +190,12 @@ cd /absolute/path/to/obsidian-memory-plugin
 npm run check
 npm test
 npm pack
-node tests/openclaw-smoke.mjs obsidian-memory-plugin-0.3.2.tgz
+node tests/openclaw-smoke.mjs obsidian-memory-plugin-<release-version>.tgz
 ```
 
 最后一项使用本机 OpenClaw 和临时隔离配置读取打包产物，不连接 Vault，
 不安装到正在运行的用户 Gateway。它不代替真实对话测试。
-完整对话用例见 [skill-scenarios.md](../obsidian-memory-plugin/tests/skill-scenarios.md)，
+完整对话用例见独立仓库中的 `tests/skill-scenarios.md`，
 包括重复整理、中途失败、旧 Raw 兼容、Global 路由与依赖隐藏状态；未运行项
 必须标为 not-run，不能用静态规则检查替代。
 
@@ -224,7 +225,8 @@ CLI 执行依赖 Obsidian 应用进程；新版本可以自动唤起应用，不
 本地 Vault 资料在被 Agent 读取后，可能进入宿主配置的模型服务上下文。
 不宣传“绝不离开本机”。不保存密码、Token、私钥、恢复码。
 
-当前已完成 OpenClaw 与 Codex 双宿主的原生支持。两者共享底层唯一的 Memory Skill 与宿主已有 Obsidian Skills，不复制多套记忆业务逻辑。未来 Hermes/Claude 等新增宿主仅需追加对应 manifest 与加载入口。
+当前已完成 OpenClaw、Codex 与 Hermes 三宿主适配，均使用各自原生入口。三者共享底层唯一的
+Memory Skill 与宿主已有 Obsidian Skills；Cyber Health 不复制记忆业务逻辑或维护宿主插件文件。
 
 ## 9. 验收口径
 
@@ -232,6 +234,7 @@ CLI 执行依赖 Obsidian 应用进程；新版本可以自动唤起应用，不
 
 - 静态/单元验证：包结构、引用、配置、Hook 行为。
 - OpenClaw 隔离加载：实际宿主识别 tarball 和内置 Skill。
+- Hermes 隔离适配：从 tarball 提取同一 Skill，验证连接变量与同名 Skill 冲突拒绝。
 - 实机知识库闭环：由真实 Agent 调用宿主 Obsidian Skills 完成，尚需单独验收。
 
 原 Cyber Health 代码和实际 Obsidian Vault 不因本插件封装而改动。

@@ -179,6 +179,29 @@ class MemoryBootstrapTests(unittest.TestCase):
         self.assertFalse((self.vault / "00-System").exists())
         self.assertFalse(json.loads(self.state.read_text(encoding="utf-8"))["installed"])
 
+    def test_hermes_or_codex_only_bootstrap_does_not_require_openclaw(self) -> None:
+        bootstrap = MemoryBootstrapper(
+            vault_path=self.vault,
+            project_root=self.root,
+            openclaw_bin=None,
+            openclaw_env={},
+            plugin_archive=self.plugin_archive,
+            obsidian_application_finder=lambda: self.obsidian_app,
+        )
+        plan = bootstrap.plan()
+        self.assertEqual(plan.obsidian_action, "verify")
+        self.assertEqual(plan.plugin_action, "skip")
+        self.assertEqual(plan.config_action, "skip")
+        self.assertEqual(plan.vault_action, "create")
+        self.assertIn("without OpenClaw", plan.reason)
+
+        memory = bootstrap.apply(plan)
+        self.assertTrue(memory.connected)
+        self.assertFalse(memory.plugin_loaded)
+        self.assertTrue((self.vault / "00-System" / "projects.yaml").is_file())
+        self.assertTrue((self.vault / "20-Projects" / (plan.project_id or "")).is_dir())
+        self.assertFalse(json.loads(self.state.read_text(encoding="utf-8"))["installed"])
+
 
 if __name__ == "__main__":
     unittest.main()

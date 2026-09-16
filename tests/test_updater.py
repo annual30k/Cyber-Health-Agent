@@ -22,6 +22,8 @@ from cyber_health.update import (
     format_text_report,
     main,
 )
+from cyber_health.memory_plugin_release import MemoryPluginRelease
+from cyber_health.core_release import CoreRelease
 
 
 class BaseUpdaterFixture(unittest.TestCase):
@@ -73,6 +75,32 @@ class BaseUpdaterFixture(unittest.TestCase):
 
 
 class TestCyberHealthUpdater(BaseUpdaterFixture):
+    def test_release_mode_resolves_core_wheel_without_local_source(self) -> None:
+        release = CoreRelease("0.3.0", "cyber_health_agent-0.3.0-py3-none-any.whl", "https://github.com/annual30k/cyber-health-agent/releases/download/v0.3.0/cyber_health_agent-0.3.0-py3-none-any.whl", "a" * 64, "https://github.com/annual30k/cyber-health-agent/releases/tag/v0.3.0")
+        updater = CyberHealthUpdater(target_dir=self.target_dir, dry_run=True, core_release_resolver=lambda: release)
+        status = updater.prepare_core_release()
+        self.assertEqual(status.action, "planned")
+        self.assertEqual(updater.new_version, "0.3.0")
+
+    def test_plugin_update_only_plans_when_a_new_verified_release_exists(self) -> None:
+        release = MemoryPluginRelease(
+            version="0.4.0",
+            archive_name="obsidian-memory-plugin-0.4.0.tgz",
+            archive_url="https://github.com/annual30k/obsidian-memory-plugin/releases/download/v0.4.0/obsidian-memory-plugin-0.4.0.tgz",
+            sha256="a" * 64,
+            release_url="https://github.com/annual30k/obsidian-memory-plugin/releases/tag/v0.4.0",
+        )
+        updater = CyberHealthUpdater(
+            project_root=self.source_root,
+            target_dir=self.target_dir,
+            openclaw_bin="/usr/bin/true",
+            dry_run=True,
+            memory_plugin_release_resolver=lambda: release,
+        )
+        planned = updater.update_memory_plugin({"memory_plugin": {"action": "downloaded", "version": "0.3.9", "sha256": "b" * 64}})
+        current = updater.update_memory_plugin({"memory_plugin": {"action": "downloaded", "version": "0.4.0", "sha256": "a" * 64}})
+        self.assertEqual(planned.action, "planned")
+        self.assertEqual(current.action, "reused")
     def test_inspect_installation(self) -> None:
         updater = CyberHealthUpdater(
             project_root=self.source_root,
@@ -142,6 +170,40 @@ class TestCyberHealthUpdater(BaseUpdaterFixture):
         ]
         ret = main(argv)
         self.assertEqual(ret, 0)
+
+    def test_update_revalidates_stored_hermes_or_codex_memory_without_openclaw(self) -> None:
+        vault = self.test_dir / "Vault"
+        project_id = "Cyber-Health-Agent-test"
+        project = vault / "20-Projects" / project_id
+        project.mkdir(parents=True)
+        (vault / "00-System").mkdir()
+        (vault / "00-System" / "projects.yaml").write_text(
+            f"projects:\n  - id: {project_id}\n    roots: []\n    scope: private\n",
+            encoding="utf-8",
+        )
+        metadata_file = self.config_dir / "installation.json"
+        metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+        metadata["memory"] = {
+            "state": "connected",
+            "vault_path": str(vault),
+            "project_id": project_id,
+        }
+        metadata_file.write_text(json.dumps(metadata), encoding="utf-8")
+
+        updater = CyberHealthUpdater(
+            project_root=self.source_root,
+            target_dir=self.target_dir,
+            openclaw_bin=None,
+            codex_bin=None,
+            hermes_bin=None,
+            dry_run=True,
+        )
+        report = updater.run()
+
+        self.assertTrue(report.success)
+        self.assertTrue(report.memory.connected)
+        self.assertFalse(report.memory.plugin_loaded)
+        self.assertEqual(report.memory.provider_args[-1], project_id)
 
     def test_updater_fail_closed_on_schema_failure(self) -> None:
         """When schema verification fails, updater fails closed: success=False and metadata untouched."""
