@@ -7,7 +7,9 @@ import tempfile
 import unittest
 from unittest import mock
 
+from cyber_health import CyberHealthService, ValidationError
 from cyber_health.health_memory import inspect_health_manager_memory
+from cyber_health.memory import MemoryUnavailable
 from cyber_health.obsidian_memory_provider import ObsidianMemoryProvider
 
 
@@ -69,6 +71,50 @@ class MemoryBridgeFixture(unittest.TestCase):
 
         results = provider.call("memory.query", {"query": "早餐规律", "limit": 10})
         self.assertEqual(results["items"][0]["confirmation_status"], "confirmed_wiki")
+
+    def test_provider_requires_confirmation_for_every_promotion_route(self) -> None:
+        provider = ObsidianMemoryProvider(self.vault, self.project_id)
+        proposed = provider.call("memory.propose", {
+            "intent_id": "intent-unconfirmed",
+            "user_id": "qiuqiquan",
+            "evidence": {"statement": "待确认"},
+        })
+        candidate_id = proposed["candidate_id"]
+        for method, payload in (
+            ("memory.confirm", {"candidate_id": candidate_id}),
+            ("memory.action", {"candidate_id": candidate_id, "action_type": "confirm"}),
+            ("memory.update", {"candidate_id": candidate_id}),
+            ("memory.reject", {"candidate_id": candidate_id, "action_type": "confirm"}),
+        ):
+            with self.subTest(method=method, payload=payload):
+                with self.assertRaises(MemoryUnavailable):
+                    provider.call(method, payload)
+        self.assertFalse((self.project / "raw" / f"raw-{candidate_id}.md").exists())
+        self.assertFalse((self.project / "wiki" / "knowledge" / f"{candidate_id}.md").exists())
+
+        promoted = provider.call("memory.action", {
+            "candidate_id": candidate_id,
+            "action_type": "confirm",
+            "confirmed": True,
+        })
+        self.assertEqual(promoted["status"], "confirmed_wiki")
+
+    def test_service_rejects_unconfirmed_generic_action_before_real_provider_io(self) -> None:
+        provider = ObsidianMemoryProvider(self.vault, self.project_id)
+        proposed = provider.call("memory.propose", {
+            "intent_id": "intent-service-boundary", "user_id": "qiuqiquan",
+            "evidence": {"statement": "待用户确认"},
+        })
+        candidate_id = proposed["candidate_id"]
+        service = CyberHealthService(Path(self.temp_dir.name) / "health.sqlite3", memory_provider=provider)
+        with self.assertRaises(ValidationError):
+            service.memory_action(
+                user_id="qiuqiquan", action_type="action", confirmed=False,
+                payload={"candidate_id": candidate_id, "action_type": "confirm"},
+                idempotency_key="no-user-confirmation",
+            )
+        self.assertFalse((self.project / "raw" / f"raw-{candidate_id}.md").exists())
+        self.assertFalse((self.project / "wiki" / "knowledge" / f"{candidate_id}.md").exists())
 
     def test_inspector_requires_plugin_and_project_scope(self) -> None:
         config = {

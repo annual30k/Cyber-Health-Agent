@@ -104,6 +104,8 @@ Agent：我发现你最近 14 天有 3 个不同日期都重复出现了相似�
 
 Provider 在确认后必须完成：
 
+`cyber_health_memory_action` 的 `confirmed=True` 只表示宿主已获得用户确认，不能单独证明用户身份或同意；宿主必须先取得用户对该候选的明确指令。适配器会拒绝缺少该标志的升格动作，并拒绝用内层 `payload.action_type` 改写外层动作。通用 `action` 调用若在 payload 中指定 `confirm`，同样需要顶层 `confirmed=True`。
+
 1. 在 `raw/` 写入不可变证据记录；
 2. 在 `wiki/knowledge/` 更新或创建长期知识；
 3. 更新项目 `index.md`；

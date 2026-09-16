@@ -246,9 +246,8 @@ class ObsidianMemoryProvider:
             "idempotent_replay": False,
         }
 
-    def _action(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _action(self, payload: dict[str, Any], action: str) -> dict[str, Any]:
         candidate_id = str(payload.get("candidate_id") or "")
-        action = str(payload.get("action_type") or payload.get("action") or "action")
         if not candidate_id or not _SAFE_COMPONENT.fullmatch(candidate_id):
             raise MemoryUnavailable("Memory action has no safe candidate_id")
         candidate = self._safe_note(self._safe_dir("inbox") / f"{candidate_id}.md")
@@ -256,11 +255,13 @@ class ObsidianMemoryProvider:
             raise MemoryUnavailable(f"Memory candidate does not exist: {candidate_id}")
         text = candidate.read_text(encoding="utf-8")
         fields, body = self._parse_frontmatter(text)
-        if action in {"reject", "delete"} or payload.get("confirmed") is False and action == "reject":
+        if action in {"confirm", "approve", "ingest", "delete", "update"} and payload.get("confirmed") is not True:
+            raise MemoryUnavailable("Memory action requires explicit confirmation ('confirmed=True')")
+        if action in {"reject", "delete"}:
             updated = self._replace_status(text, "rejected")
             self._atomic_write(candidate, updated)
             return {"status": "rejected", "candidate_id": candidate_id, "path": str(candidate.relative_to(self.project_path))}
-        if not payload.get("confirmed") and action not in {"confirm", "approve", "ingest"}:
+        if action == "action":
             return {"status": "pending", "candidate_id": candidate_id, "path": str(candidate.relative_to(self.project_path))}
 
         # Check the complete ingest receipt boundary before creating Raw/Wiki,
@@ -376,8 +377,13 @@ class ObsidianMemoryProvider:
             return self._propose(payload)
         if normalized in {"action", "confirm", "approve", "reject", "delete", "update"}:
             action_payload = dict(payload)
-            action_payload.setdefault("action_type", normalized)
-            return self._action(action_payload)
+            aliases = [action_payload[key] for key in ("action_type", "action") if key in action_payload]
+            if any(not isinstance(alias, str) for alias in aliases) or len(set(aliases)) > 1 or (normalized != "action" and any(alias != normalized for alias in aliases)):
+                raise MemoryUnavailable("Payload memory action conflicts with the requested action")
+            action = aliases[0] if normalized == "action" and aliases else normalized
+            if action not in {"action", "confirm", "approve", "ingest", "reject", "delete", "update"}:
+                raise MemoryUnavailable(f"Unsupported Obsidian MemoryProvider action: {action}")
+            return self._action(action_payload, action)
         if normalized == "maintain":
             pending = len(list(self._iter_notes(self._safe_dir("inbox"))))
             return {"status": "ok", "provider": "obsidian", "pending_candidates": pending}

@@ -424,6 +424,33 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
         self.assertEqual(len(mock_prov.calls), 1)
         self.assertEqual(mock_prov.calls[0][0], "memory.delete")
 
+    def test_memory_action_cannot_smuggle_confirmation_in_payload(self) -> None:
+        mock_prov = MockMemoryProvider()
+        service = CyberHealthService(self.db_path, memory_provider=mock_prov)
+        for action_type, confirmed, payload in (
+            ("action", False, {"candidate_id": "cand-example", "action_type": "confirm"}),
+            ("action", False, {"candidate_id": "cand-example", "action": "delete"}),
+            ("confirm", False, {"candidate_id": "cand-example", "confirmed": True}),
+            ("reject", False, {"candidate_id": "cand-example", "action_type": "confirm"}),
+        ):
+            with self.subTest(action_type=action_type, payload=payload):
+                with self.assertRaises(ValidationError):
+                    service.memory_action(
+                        user_id="u_act", action_type=action_type,
+                        confirmed=confirmed, payload=payload,
+                        idempotency_key=f"reject-{action_type}-{len(mock_prov.calls)}",
+                    )
+        self.assertEqual(mock_prov.calls, [])
+
+        accepted = service.memory_action(
+            user_id="u_act", action_type="action", confirmed=True,
+            payload={"candidate_id": "cand-example", "action_type": "confirm"},
+            idempotency_key="confirmed-generic-action",
+        )
+        self.assertEqual(accepted["status"], "success")
+        self.assertEqual(mock_prov.calls[0][0], "memory.action")
+        self.assertIs(mock_prov.calls[0][1]["confirmed"], True)
+
     def test_maintain_memory_supersedes_stale_trend_when_all_meals_deleted(self) -> None:
         """Verify that deleting the last meal in a historical week supersedes the stale trend and preserves lineage."""
         user_id = "u_del_trend"

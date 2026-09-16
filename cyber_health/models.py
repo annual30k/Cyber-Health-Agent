@@ -414,6 +414,19 @@ class MaintainMemoryInput(BaseModel):
 VALID_MEMORY_ACTIONS = {"propose", "confirm", "reject", "update", "delete", "action"}
 
 
+def _effective_memory_action(action: str, payload: dict[str, Any]) -> str:
+    """Resolve one action; payload aliases must not override an explicit method."""
+    aliases = [payload[key] for key in ("action_type", "action") if key in payload]
+    if any(not isinstance(alias, str) or alias not in VALID_MEMORY_ACTIONS for alias in aliases):
+        raise ValueError("Invalid memory action in payload")
+    if len(set(aliases)) > 1:
+        raise ValueError("Conflicting memory actions in payload")
+    embedded = aliases[0] if aliases else None
+    if action != "action" and embedded is not None and embedded != action:
+        raise ValueError("Payload memory action conflicts with the requested action")
+    return embedded if action == "action" and embedded is not None else action
+
+
 class ProposeMemoryInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -434,6 +447,7 @@ class ProposeMemoryInput(BaseModel):
     def validate_payload(self) -> ProposeMemoryInput:
         norm = self.method.removeprefix("memory.")
         p = self.payload or {}
+        norm = _effective_memory_action(norm, p)
         cid = p.get("candidate_id")
         is_confirmed = p.get("confirmed") is True
 
@@ -482,11 +496,12 @@ class MemoryActionInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_action_payload(self) -> MemoryActionInput:
-        act = self.action_type
         p = self.payload or {}
+        act = _effective_memory_action(self.action_type, p)
         cid = self.candidate_id or p.get("candidate_id")
         target = self.target_note_path or p.get("target_note_path")
-        is_confirmed = self.confirmed or p.get("confirmed") is True
+        # Only the dedicated tool parameter can assert confirmation; payload is untrusted data.
+        is_confirmed = self.confirmed
 
         if act == "confirm":
             if not cid:

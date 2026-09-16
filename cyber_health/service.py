@@ -5294,8 +5294,6 @@ class CyberHealthService:
             p["candidate_id"] = candidate_id
         if target_note_path is not None:
             p["target_note_path"] = target_note_path
-        if confirmed:
-            p["confirmed"] = True
 
         # Validation happens FIRST: any invalid action or unconfirmed delete/confirm fails immediately before DB/IO
         try:
@@ -5311,6 +5309,8 @@ class CyberHealthService:
         except Exception as err:
             raise ValidationError(str(err)) from err
 
+        # The validated top-level flag is authoritative, even if payload supplied a different value.
+        p["confirmed"] = validated.confirmed
         method = f"memory.{validated.action_type}"
         return self.propose_memory_candidate(
             user_id=user_id,
