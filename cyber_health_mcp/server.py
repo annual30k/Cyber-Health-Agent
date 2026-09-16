@@ -1,6 +1,6 @@
 """MCP Server for Cyber Health Agent.
 
-Exposes P0 tools by default adhering strictly to the OpenClaw adapter specification.
+Exposes host-neutral P0 tools and server instructions to Codex, OpenClaw, and other MCP clients.
 Can expose full domain toolset when CYBER_HEALTH_ALLOW_ALL_TOOLS=1.
 """
 

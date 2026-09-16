@@ -1,6 +1,6 @@
-# Cyber Health Agent (Core & stdio MCP v0.2.6)
+# Cyber Health Agent (Core & stdio MCP v0.2.7)
 
-> Pluggable deterministic health engine and stdio MCP server for AI hosts (OpenClaw, Hermes, etc.).
+> Independent, pluggable deterministic health engine and stdio MCP server for AI hosts (Codex, OpenClaw, Hermes, etc.). It is not an Obsidian plugin.
 > **Current Status**: Core P0 implementation and extended domain capabilities (27 tools total: 7 P0 + 20 extended), including first-run intake, nightly fact collection, target-gap analysis, host automation declarations, next-day plan generation, cross-session wearable screenshot retention, and read-only active-memory pattern suggestions.
 
 ---
@@ -10,7 +10,7 @@
 ```text
 [User Dialogue / Photo Food Description]
                   ↓
-[AI Host: OpenClaw / Hermes]  (Natural language comprehension & vision)
+[AI Host: Codex / OpenClaw / Hermes]  (Natural language comprehension & vision)
                   ↓ stdio MCP protocol
 [Cyber Health MCP Adapter]    (cyber_health_mcp: FastMCP, JSON schema validation, sanitized envelope)
                   ↓
@@ -44,9 +44,9 @@
 
 ## Standard Installation Contract (for Agents and Users)
 
-When installing Cyber Health for OpenClaw, the required installation entry point is
+When installing Cyber Health for Codex or OpenClaw, the required installation entry point is
 `cyber-health install`. Agents must not replace this with only `pip install`, `uv sync`,
-or a hand-written `openclaw mcp add` command, because those paths do not run the
+or a hand-written host registration command, because those paths do not run the
 health-manager long-term-memory preflight.
 
 Run the read-only preflight first, then apply the installation:
@@ -95,7 +95,7 @@ Alternatively, invoke via Python module:
 ```
 
 The production-safe management CLI is the only supported production entry point for the
-install/update workflow. Its report includes the OpenClaw and `health-manager` memory preflight
+install/update workflow. Its report includes Codex, OpenClaw, and `health-manager` preflight
 described below:
 
 ```bash
@@ -108,6 +108,17 @@ described below:
 .venv/bin/cyber-health install
 .venv/bin/cyber-health update
 ```
+
+### Codex native MCP registration
+
+When the Codex CLI is available, install and update register the fixed `cyber-health`
+stdio MCP entry in Codex's shared local MCP configuration. The command points to the
+isolated `~/.cyber-health/venv/bin/cyber-health-mcp` executable and SQLite database.
+`cyber-health status` verifies both its command signature and installation path.
+Uninstall removes the entry only after the same ownership checks and a last-moment
+state fingerprint check. A foreign or ambiguous same-name entry fails closed; all other
+Codex MCP entries and settings remain untouched. Use `--skip-codex` only when deliberately
+installing without Codex integration.
 
 ### OpenClaw / Obsidian Memory preflight
 
@@ -234,6 +245,7 @@ The packaged console entry point `cyber-health-uninstall` cleanly manages host r
 
 - **Production-Safe Data Preservation**: By default, `cyber-health-uninstall` **strictly preserves** all SQLite databases (`*.sqlite3`, `*-wal`, `*-shm`), exports, `.venv`, distribution wheels, and user data.
 - **Strict Cross-Project Non-Interference**: `obsidian-memory` is a separate cross-project plugin and **not** a Cyber Health component. The uninstaller **never** uninstalls, disables, edits, or deletes `obsidian-memory`, its Codex plugin/marketplace/cache, any Obsidian Vault, or unrelated OpenClaw configurations.
+- **Codex Entry Isolation**: Codex integration manages only the fixed `cyber-health` MCP entry through `codex mcp get/add/remove`; unrelated Codex configuration is preserved. Cyber Health itself remains an independent Python Core + MCP server, not an Obsidian plugin.
 - **Strict Ownership Verification**: OpenClaw MCP entries (`cyber-health`) are inspected via `openclaw mcp show cyber-health --json`. Removal via `openclaw mcp unset` (never `remove`) is performed only when command, cwd, or database parameters demonstrably point to this repository root. Foreign or ambiguous entries are hard-refused unless the recovery-only override `--force-foreign-host-mcp` is explicitly paired with `--confirm-foreign-unset UNSET_FOREIGN_CYBER_HEALTH`.
 - **Safe LaunchAgent Management**: LaunchAgents are handled only for the fixed project label (`ai.cyber-health.agent`) at `~/Library/LaunchAgents/ai.cyber-health.agent.plist`, and ownership is proven from program/working directory paths. Arbitrary label targeting and pattern deletion are prohibited.
 - **Gated Data Purge (`--purge-data`)**: Opt-in data removal strictly requires the strong confirmation token `--confirm-purge DELETE_CYBER_HEALTH_DATA`. Symlinks, path traversals (`..`), root/home/broad system directories, and out-of-boundary paths are rejected. Approved targets prefer recoverable trash semantics and never inspect or display health contents.
@@ -249,7 +261,7 @@ Run the full test suite using `unittest`:
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-Current test suite contains **224 automated test cases** across 28 test files (100% passing), including active-memory suggestion, provider bridge, installer, updater, and package-version consistency coverage:
+Current test suite contains **228 automated test cases** across 29 test files (100% passing), including Codex host registration, active-memory suggestion, provider bridge, installer, updater, and package-version consistency coverage:
 
 ### Part A. Codex Review & Independent Verification Suites (89 tests)
 - `tests/test_codex_review.py` (8 tests): Round 1 regressions (mandatory idempotency keys, calendar validation, range checks, repeat resolution).
@@ -276,7 +288,8 @@ Current test suite contains **224 automated test cases** across 28 test files (1
 - `tests/test_domain_remaining.py` (6 tests): Training plan states, workout check-in red flags, knowledge query disclosures, data export/import round-trip, schedule event lifecycle, and MCP error envelope input sanitization.
 - `tests/test_domain_memory_and_trends.py` (13 tests): Dual-layer memory query, remaining calorie guidance, weekly trend aggregation, missing day disclosure, idempotent maintenance, late meal revision chains, detail pruning, and exercise decision matrix.
 
-### Part C. Isolated Host & Uninstallation Safety Suites (30 tests)
+### Part C. Isolated Host & Uninstallation Safety Suites (34 tests)
+- `tests/test_codex_integration.py` (4 tests): isolated Codex add/get/remove lifecycle, foreign same-name refusal, unrelated-config preservation, and a real CLI round trip under an isolated `CODEX_HOME`.
 - `tests/test_uninstaller.py` (30 tests): Host integration uninstallation contracts (including packaged-CLI OpenClaw auto-detection, exact-state fingerprints and global preflight, fail-closed execution ordering, deterministic dry-run purity, normal data preservation, sanitized reporting without raw environment leakage, refusal of unrelated/foreign OpenClaw registrations, project-root prefix collision rejection, command signature spoofing rejection, double confirmation token for foreign unsets, CLI inspection error fail-closed handling with secret redaction, explicit `--confirm-purge` token requirement, TOCTOU post-plan symlink/inode/host-state swap defenses, refusal of destructive purge when host inspector is missing, fixed LaunchAgent label enforcement, project-local `.trash` symlink rejection, preservation of unknown files in data directory, idempotent repeat execution, non-interference with `obsidian-memory`, Obsidian Vaults, and Codex state, and isolated live OpenClaw sandbox probe).
 - `tests/test_onboarding_flow.py` (5 tests): First-run grouped intake, automation declaration, nightly missing-fact questions, target-gap/workout analysis, detailed tomorrow plan, read purity, and plan gating.
 
@@ -286,7 +299,7 @@ Current test suite contains **224 automated test cases** across 28 test files (1
 
 > [!IMPORTANT]
 > **Declaration of System Status & Physical Boundaries**:
-> The local Cyber Health Core engine, stdio MCP server, and uninstaller have completed automated verification within the v0.2.6 scope. However, **this does not constitute production deployment or physical external integration**:
+> The local Cyber Health Core engine, stdio MCP server, and host integration lifecycle have completed automated verification within the v0.2.7 scope. However, **this does not constitute production deployment or physical external integration**:
 > 1. **Obsidian Vault / MemoryProvider: Conditional connection only**: If the install/update preflight is incomplete, or the Provider is unavailable, Cyber Health does not connect to the Vault and keeps long-term memory in deferred/outbox processing (`MEMORY_DEFERRED`). When the preflight passes and the `cyber-health` MCP registration includes the validated `--memory-provider obsidian`, `--memory-vault`, and `--memory-project-id` parameters, Cyber Health can connect to the verified `health-manager` project. No connection is implicit, and explicit provider authorization remains required.
 > 2. **Cross-Project Plugin Boundaries**: `obsidian-memory` is a separate cross-project plugin and is never modified, disabled, or removed by Cyber Health Agent tools.
 > 3. **Host Active Push Notifications: Not Registered**: Core is a headless request-response MCP server that outputs dynamic trigger conditions, suppression reasons, and tombstones. Active push notifications require a host-level scheduler or daemon (e.g. OpenClaw Cron, Launchd).

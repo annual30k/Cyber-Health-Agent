@@ -28,6 +28,7 @@ from .install import (
 )
 from .uninstall import verify_cyber_health_command_signature
 from .health_memory import HealthManagerMemoryStatus, inspect_health_manager_memory
+from .codex_integration import find_codex_cli, inspect_codex_registration
 
 
 def run_status(target_dir_str: str | None, as_json: bool = False) -> int:
@@ -54,6 +55,8 @@ def run_status(target_dir_str: str | None, as_json: bool = False) -> int:
         "venv_ready": venv_python.exists() and mcp_bin.exists(),
         "openclaw_registered": False,
         "openclaw_details": {},
+        "codex_registered": False,
+        "codex_details": {},
         "health_manager_memory": HealthManagerMemoryStatus().to_dict(),
     }
 
@@ -111,6 +114,18 @@ def run_status(target_dir_str: str | None, as_json: bool = False) -> int:
         except Exception:
             pass
 
+    codex_bin = find_codex_cli()
+    if codex_bin:
+        codex_status = inspect_codex_registration(codex_bin, target_dir, db_file)
+        status_data["codex_registered"] = (
+            codex_status.detected and codex_status.ownership_proven
+        )
+        status_data["codex_details"] = {
+            "command": codex_status.command,
+            "ownership_verified": codex_status.ownership_proven,
+            "reason": codex_status.reason,
+        }
+
     if as_json:
         print(json.dumps(status_data, indent=2))
     else:
@@ -132,6 +147,9 @@ def run_status(target_dir_str: str | None, as_json: bool = False) -> int:
         print(f"OpenClaw Registered : {'YES' if status_data['openclaw_registered'] else 'NO'}")
         if status_data["openclaw_registered"]:
             print(f"OpenClaw Command    : {status_data['openclaw_details'].get('command')}")
+        print(f"Codex Registered    : {'YES' if status_data['codex_registered'] else 'NO'}")
+        if status_data["codex_registered"]:
+            print(f"Codex Command       : {status_data['codex_details'].get('command')}")
         memory = status_data["health_manager_memory"]
         print(f"Health Memory       : {memory.get('state', 'unavailable')}")
         if memory.get("reason"):
@@ -161,6 +179,9 @@ def main(argv: list[str] | None = None) -> int:
     install_parser.add_argument("--no-uv", action="store_true")
     install_parser.add_argument("--editable", action="store_true")
     install_parser.add_argument("--skip-openclaw", action="store_true")
+    install_parser.add_argument("--skip-codex", action="store_true")
+    install_parser.add_argument("--codex-bin", type=str, default=None)
+    install_parser.add_argument("--codex-home", type=str, default=None)
 
     # update
     update_parser = subparsers.add_parser("update", help="Update Cyber Health Agent with automatic database backup")
@@ -169,6 +190,8 @@ def main(argv: list[str] | None = None) -> int:
     update_parser.add_argument("--dry-run", action="store_true")
     update_parser.add_argument("--json", action="store_true")
     update_parser.add_argument("--no-uv", action="store_true")
+    update_parser.add_argument("--codex-bin", type=str, default=None)
+    update_parser.add_argument("--codex-home", type=str, default=None)
 
     # uninstall
     uninstall_parser = subparsers.add_parser("uninstall", help="Safely uninstall Cyber Health Agent host integrations")
@@ -178,6 +201,8 @@ def main(argv: list[str] | None = None) -> int:
     uninstall_parser.add_argument("--confirm-purge", type=str, default=None)
     uninstall_parser.add_argument("--project-root", type=str, default=None)
     uninstall_parser.add_argument("--db", type=str, default=None)
+    uninstall_parser.add_argument("--codex-bin", type=str, default=None)
+    uninstall_parser.add_argument("--codex-home", type=str, default=None)
 
     # status
     status_parser = subparsers.add_parser("status", help="Show Cyber Health Agent installation and database status")

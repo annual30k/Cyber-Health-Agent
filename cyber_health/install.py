@@ -2,8 +2,8 @@
 
 Installs Cyber Health Agent into a dedicated, isolated host directory (default: ~/.cyber-health),
 sets up an isolated Python virtual environment, safely migrates existing SQLite data
-with SHA256 integrity verification, and automatically configures OpenClaw MCP server registration.
-Guarantees strict non-interference with obsidian-memory, Obsidian Vaults, and Codex states.
+with SHA256 integrity verification, and configures supported host MCP registrations.
+Cyber Health remains an independent Python Core + stdio MCP server.
 """
 
 from __future__ import annotations
@@ -24,6 +24,12 @@ from typing import Any
 
 from .uninstall import verify_cyber_health_command_signature
 from .health_memory import HealthManagerMemoryStatus, inspect_health_manager_memory
+from .codex_integration import (
+    CodexRegistrationStatus,
+    apply_codex_registration,
+    find_codex_cli,
+    plan_codex_registration,
+)
 
 FIXED_OPENCLAW_SERVER_NAME = "cyber-health"
 DEFAULT_INSTALL_DIR_NAME = ".cyber-health"
@@ -227,13 +233,14 @@ class InstallReport:
     venv_dir: str
     data: DataMigrationStatus
     openclaw: OpenClawRegistrationStatus
+    codex: CodexRegistrationStatus = field(default_factory=CodexRegistrationStatus)
     memory: HealthManagerMemoryStatus = field(default_factory=HealthManagerMemoryStatus)
     message: str = ""
     protected_boundaries: dict[str, bool] = field(
         default_factory=lambda: {
             "obsidian_memory_preserved": True,
             "obsidian_vaults_preserved": True,
-            "codex_state_preserved": True,
+            "unrelated_codex_state_preserved": True,
             "source_repo_preserved": True,
         }
     )
@@ -248,10 +255,13 @@ class CyberHealthInstaller:
         openclaw_bin: str | None | object = _DEFAULT_BIN,
         openclaw_config: Path | str | None = None,
         openclaw_state_dir: Path | str | None = None,
+        codex_bin: str | None | object = _DEFAULT_BIN,
+        codex_home: Path | str | None = None,
         dry_run: bool = False,
         use_uv: bool = True,
         editable: bool = False,
         skip_openclaw: bool = False,
+        skip_codex: bool = False,
     ):
         # Resolve source project root
         if project_root is None:
@@ -305,11 +315,17 @@ class CyberHealthInstaller:
             self.openclaw_bin = str(openclaw_bin) if openclaw_bin else None
         self.openclaw_config = Path(openclaw_config) if openclaw_config else None
         self.openclaw_state_dir = Path(openclaw_state_dir) if openclaw_state_dir else None
+        if codex_bin is _DEFAULT_BIN:
+            self.codex_bin = find_codex_cli()
+        else:
+            self.codex_bin = str(codex_bin) if codex_bin else None
+        self.codex_home = Path(codex_home) if codex_home else None
 
         self.dry_run = dry_run
         self.use_uv = use_uv
         self.editable = editable
         self.skip_openclaw = skip_openclaw
+        self.skip_codex = skip_codex
 
         # Read version from pyproject.toml or fallback
         self.version = self._detect_version()
@@ -537,6 +553,21 @@ class CyberHealthInstaller:
         status.reason = f"OpenClaw inspection failed with exit code {result.returncode}"
         return status
 
+    def plan_codex(self) -> CodexRegistrationStatus:
+        """Inspect and plan the independent Codex stdio MCP registration."""
+        target_mcp = get_venv_bin_dir(self.venv_dir) / get_executable_name("cyber-health-mcp")
+        args = ["--db", str(self.target_db_path), "--allow-all", *self.memory_status.provider_args]
+        return plan_codex_registration(
+            self.codex_bin,
+            self.target_dir,
+            self.target_db_path,
+            str(target_mcp),
+            args,
+            "",
+            codex_home=self.codex_home,
+            skip=self.skip_codex,
+        )
+
     def execute_data_migration(self, data_plan: DataMigrationStatus) -> None:
         """Executes safe atomic migration of SQLite database and verifies checksums."""
         if data_plan.action != "migrated":
@@ -735,7 +766,15 @@ class CyberHealthInstaller:
         openclaw_status.executed = True
         openclaw_status.reason = f"Successfully registered MCP server {FIXED_OPENCLAW_SERVER_NAME} in OpenClaw"
 
-    def write_installation_metadata(self) -> None:
+    def register_codex(self, codex_status: CodexRegistrationStatus) -> None:
+        apply_codex_registration(
+            self.codex_bin,
+            codex_status,
+            codex_home=self.codex_home,
+            dry_run=self.dry_run,
+        )
+
+    def write_installation_metadata(self, codex_status: CodexRegistrationStatus) -> None:
         """Records installation metadata to config/installation.json."""
         if self.dry_run:
             return
@@ -751,6 +790,10 @@ class CyberHealthInstaller:
             "mcp_executable": str(get_venv_bin_dir(self.venv_dir) / get_executable_name("cyber-health-mcp")),
             "editable": self.editable,
             "memory": self.memory_status.to_dict(),
+            "codex": {
+                "name": codex_status.name,
+                "registered": codex_status.executed or codex_status.action == "update",
+            },
         }
 
         meta_file = self.config_dir / "installation.json"
@@ -762,6 +805,7 @@ class CyberHealthInstaller:
         error: Exception,
         data_plan: DataMigrationStatus,
         openclaw_plan: OpenClawRegistrationStatus,
+        codex_plan: CodexRegistrationStatus,
     ) -> Path | None:
         """Persist a non-destructive recovery marker for a partial install."""
         if self.dry_run or not self.target_dir.exists():
@@ -781,6 +825,8 @@ class CyberHealthInstaller:
                         "data_executed": data_plan.executed,
                         "openclaw_action": openclaw_plan.action,
                         "openclaw_executed": openclaw_plan.executed,
+                        "codex_action": codex_plan.action,
+                        "codex_executed": codex_plan.executed,
                         "memory": self.memory_status.to_dict(),
                         "target_dir": str(self.target_dir),
                         "user_data_preserved": True,
@@ -800,6 +846,7 @@ class CyberHealthInstaller:
         data_plan = self.plan_data_migration()
         memory_plan = self.plan_memory()
         openclaw_plan = self.plan_openclaw()
+        codex_plan = self.plan_codex()
 
         # Phase 2: Fail-closed validation check
         refusal_reasons: list[str] = []
@@ -807,6 +854,8 @@ class CyberHealthInstaller:
             refusal_reasons.append(f"Data migration error: {data_plan.reason}")
         if openclaw_plan.action == "error":
             refusal_reasons.append(f"OpenClaw registration error: {openclaw_plan.reason}")
+        if codex_plan.action in ("error", "refused"):
+            refusal_reasons.append(f"Codex registration error: {codex_plan.reason}")
 
         if refusal_reasons:
             return InstallReport(
@@ -818,6 +867,7 @@ class CyberHealthInstaller:
                 venv_dir=str(self.venv_dir),
                 data=data_plan,
                 openclaw=openclaw_plan,
+                codex=codex_plan,
                 memory=memory_plan,
                 message="; ".join(refusal_reasons),
             )
@@ -833,6 +883,7 @@ class CyberHealthInstaller:
                 venv_dir=str(self.venv_dir),
                 data=data_plan,
                 openclaw=openclaw_plan,
+                codex=codex_plan,
                 memory=memory_plan,
                 message="Dry run completed successfully (zero mutations)",
             )
@@ -846,13 +897,15 @@ class CyberHealthInstaller:
             self.execute_data_migration(data_plan)
             phase = "openclaw_registration"
             self.register_openclaw(openclaw_plan)
+            phase = "codex_registration"
+            self.register_codex(codex_plan)
             phase = "metadata"
-            self.write_installation_metadata()
+            self.write_installation_metadata(codex_plan)
             failure_marker = self.config_dir / "install-failure.json"
             if failure_marker.exists():
                 failure_marker.unlink()
         except Exception as exc:
-            marker = self.write_installation_failure_marker(phase, exc, data_plan, openclaw_plan)
+            marker = self.write_installation_failure_marker(phase, exc, data_plan, openclaw_plan, codex_plan)
             marker_note = f" Recovery marker: {marker}." if marker else " Recovery marker could not be written."
             return InstallReport(
                 dry_run=False,
@@ -863,6 +916,7 @@ class CyberHealthInstaller:
                 venv_dir=str(self.venv_dir),
                 data=data_plan,
                 openclaw=openclaw_plan,
+                codex=codex_plan,
                 memory=memory_plan,
                 message=(
                     f"Installation failed during {phase}: {exc}. "
@@ -881,6 +935,7 @@ class CyberHealthInstaller:
             venv_dir=str(self.venv_dir),
             data=data_plan,
             openclaw=openclaw_plan,
+            codex=codex_plan,
             memory=memory_plan,
             message="Installation completed successfully",
         )
@@ -927,6 +982,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="OpenClaw state directory override.",
     )
+    parser.add_argument("--codex-bin", type=str, default=_DEFAULT_BIN, help="Codex CLI binary path override.")
+    parser.add_argument("--codex-home", type=str, default=None, help="Codex home override (primarily for isolated testing).")
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -952,6 +1009,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip registering or updating OpenClaw MCP server configuration.",
     )
+    parser.add_argument("--skip-codex", action="store_true", help="Skip Codex MCP registration.")
     return parser
 
 
@@ -986,6 +1044,15 @@ def format_text_report(report: InstallReport) -> str:
         f"Reason       : {report.openclaw.reason}",
         f"Executed     : {report.openclaw.executed}",
         "",
+        "--- Codex Integration ---",
+        f"Server Name  : {report.codex.name}",
+        f"Detected     : {report.codex.detected}",
+        f"Action       : {report.codex.action}",
+        f"Command      : {report.codex.command}",
+        f"Args         : {' '.join(report.codex.args)}",
+        f"Reason       : {report.codex.reason}",
+        f"Executed     : {report.codex.executed}",
+        "",
         "--- Health-Manager Long-Term Memory ---",
         f"State        : {report.memory.state}",
         f"Plugin       : {report.memory.plugin_id} (loaded={report.memory.plugin_loaded})",
@@ -997,7 +1064,7 @@ def format_text_report(report: InstallReport) -> str:
         "--- Protected Boundaries ---",
         "  + obsidian-memory: STRICTLY PRESERVED (Untouched)",
         "  + Obsidian Vaults: STRICTLY PRESERVED (Untouched)",
-        "  + Codex State:     STRICTLY PRESERVED (Untouched)",
+        "  + Codex Config:    ONLY cyber-health MCP entry managed; unrelated state preserved",
         "  + Source Repo:     STRICTLY PRESERVED (Untouched)",
         "============================================================",
     ]
@@ -1016,10 +1083,13 @@ def main(argv: list[str] | None = None) -> int:
             openclaw_bin=args.openclaw_bin,
             openclaw_config=args.openclaw_config,
             openclaw_state_dir=args.openclaw_state_dir,
+            codex_bin=args.codex_bin,
+            codex_home=args.codex_home,
             dry_run=args.dry_run,
             use_uv=not args.no_uv,
             editable=args.editable,
             skip_openclaw=args.skip_openclaw,
+            skip_codex=args.skip_codex,
         )
         report = installer.run()
     except Exception as exc:

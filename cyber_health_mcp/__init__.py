@@ -1,6 +1,6 @@
 """Cyber Health MCP package."""
 
-__version__ = "0.2.6"
+__version__ = "0.2.7"
 
 from .server import create_mcp_server, get_default_db_path, main
 

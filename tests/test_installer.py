@@ -154,6 +154,7 @@ class TestCyberHealthInstaller(BaseInstallerFixture):
             project_root=self.source_root,
             target_dir=self.target_dir,
             openclaw_bin=str(self.fake_openclaw_bin),
+            codex_bin=None,
             dry_run=True,
         )
         plan = installer.plan_data_migration()
@@ -228,6 +229,7 @@ class TestCyberHealthInstaller(BaseInstallerFixture):
             project_root=self.source_root,
             target_dir=self.target_dir,
             openclaw_bin=str(self.fake_openclaw_bin),
+            codex_bin=None,
             dry_run=True,
         )
         report = installer.run()
@@ -325,6 +327,7 @@ class TestCyberHealthInstaller(BaseInstallerFixture):
             "--project-root", str(self.source_root),
             "--target-dir", str(self.target_dir),
             "--openclaw-bin", str(self.fake_openclaw_bin),
+            "--skip-codex",
             "--dry-run",
             "--json",
         ]
@@ -367,6 +370,7 @@ class TestCyberHealthInstaller(BaseInstallerFixture):
             project_root=self.source_root,
             target_dir=self.target_dir,
             openclaw_bin=str(self.fake_openclaw_bin),
+            codex_bin=None,
             dry_run=False,
         )
         bad_res = mock.MagicMock(returncode=0, stdout="INTERNAL_ERROR: {malformed json", stderr="")
@@ -431,6 +435,7 @@ class TestCyberHealthInstaller(BaseInstallerFixture):
             project_root=self.source_root,
             target_dir=self.target_dir,
             openclaw_bin=str(self.fake_openclaw_bin),
+            codex_bin=None,
             dry_run=False,
         )
 

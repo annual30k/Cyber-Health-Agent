@@ -3,7 +3,7 @@
 Updates Cyber Health Agent in ~/.cyber-health (or custom target directory),
 creates an atomic timestamped database snapshot backup with SHA256 and integrity checks,
 upgrades the package and dependencies, runs SQLite schema verification,
-and refreshes OpenClaw MCP registration.
+and refreshes supported host MCP registrations.
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ from .service import CyberHealthService
 from .uninstall import verify_cyber_health_command_signature
 from .health_memory import HealthManagerMemoryStatus, inspect_health_manager_memory
 from .obsidian_memory_provider import ObsidianMemoryProvider
+from .codex_integration import apply_codex_registration, find_codex_cli, plan_codex_registration
 
 _DEFAULT_BIN = object()
 
@@ -72,12 +73,13 @@ class UpdateReport:
     package_updated: bool = False
     schema_verified: bool = False
     openclaw_verified: bool = False
+    codex_verified: bool = False
     message: str = ""
     protected_boundaries: dict[str, bool] = field(
         default_factory=lambda: {
             "obsidian_memory_preserved": True,
             "obsidian_vaults_preserved": True,
-            "codex_state_preserved": True,
+            "unrelated_codex_state_preserved": True,
             "source_repo_preserved": True,
         }
     )
@@ -91,6 +93,8 @@ class CyberHealthUpdater:
         openclaw_bin: str | None | object = _DEFAULT_BIN,
         openclaw_config: Path | str | None = None,
         openclaw_state_dir: Path | str | None = None,
+        codex_bin: str | None | object = _DEFAULT_BIN,
+        codex_home: Path | str | None = None,
         dry_run: bool = False,
         use_uv: bool = True,
     ):
@@ -127,6 +131,11 @@ class CyberHealthUpdater:
             self.openclaw_bin = str(openclaw_bin) if openclaw_bin else None
         self.openclaw_config = Path(openclaw_config) if openclaw_config else None
         self.openclaw_state_dir = Path(openclaw_state_dir) if openclaw_state_dir else None
+        if codex_bin is _DEFAULT_BIN:
+            self.codex_bin = find_codex_cli()
+        else:
+            self.codex_bin = str(codex_bin) if codex_bin else None
+        self.codex_home = Path(codex_home) if codex_home else None
 
         self.dry_run = dry_run
         self.use_uv = use_uv
@@ -412,6 +421,32 @@ class CyberHealthUpdater:
         except Exception:
             return False
 
+    def verify_codex(self) -> bool:
+        """Verify or refresh the single owned Codex MCP registration."""
+        target_mcp = get_venv_bin_dir(self.venv_dir) / get_executable_name("cyber-health-mcp")
+        expected_args = ["--db", str(self.target_db_path), "--allow-all", *self.memory_status.provider_args]
+        status = plan_codex_registration(
+            self.codex_bin,
+            self.target_dir,
+            self.target_db_path,
+            str(target_mcp),
+            expected_args,
+            "",
+            codex_home=self.codex_home,
+        )
+        if status.action in ("error", "refused"):
+            return False
+        try:
+            apply_codex_registration(
+                self.codex_bin,
+                status,
+                codex_home=self.codex_home,
+                dry_run=self.dry_run,
+            )
+            return True
+        except Exception:
+            return False
+
     def update_metadata(self, old_meta: dict[str, Any], backup_status: BackupStatus) -> None:
         """Updates config/installation.json with new version details."""
         if self.dry_run:
@@ -422,6 +457,10 @@ class CyberHealthUpdater:
         if backup_status.backup_file:
             old_meta["last_backup"] = backup_status.backup_file
         old_meta["memory"] = self.memory_status.to_dict()
+        old_meta["codex"] = {
+            "name": "cyber-health",
+            "registered": bool(self.codex_bin),
+        }
 
         meta_file = self.config_dir / "installation.json"
         atomic_write_text(meta_file, json.dumps(old_meta, indent=2))
@@ -485,6 +524,27 @@ class CyberHealthUpdater:
                     ),
                 )
 
+            codex_ok = self.verify_codex()
+            if not codex_ok:
+                return UpdateReport(
+                    dry_run=self.dry_run,
+                    success=False,
+                    target_dir=str(self.target_dir),
+                    old_version=old_version,
+                    new_version=self.new_version,
+                    backup=backup_status,
+                    memory=self.memory_status,
+                    package_updated=pkg_updated,
+                    schema_verified=schema_ok,
+                    openclaw_verified=True,
+                    codex_verified=False,
+                    message=(
+                        "Update aborted (fail-closed): Codex registration verification failed. "
+                        "The package may already have been upgraded; the verified database "
+                        f"backup is available at {backup_status.backup_file or 'the backup directory'}."
+                    ),
+                )
+
             self.update_metadata(old_meta, backup_status)
 
             return UpdateReport(
@@ -498,6 +558,7 @@ class CyberHealthUpdater:
                 package_updated=pkg_updated,
                 schema_verified=True,
                 openclaw_verified=True,
+                codex_verified=True,
                 message="Update completed successfully",
             )
         except Exception as exc:
@@ -548,6 +609,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="OpenClaw state directory override.",
     )
+    parser.add_argument("--codex-bin", type=str, default=_DEFAULT_BIN, help="Codex CLI binary path override.")
+    parser.add_argument("--codex-home", type=str, default=None, help="Codex home override (primarily for isolated testing).")
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -587,6 +650,7 @@ def format_text_report(report: UpdateReport) -> str:
         f"Package Upgraded : {report.package_updated}",
         f"Schema Verified  : {report.schema_verified}",
         f"OpenClaw Verified: {report.openclaw_verified}",
+        f"Codex Verified   : {report.codex_verified}",
         "",
         "--- Health-Manager Long-Term Memory ---",
         f"State            : {report.memory.state}",
@@ -599,7 +663,7 @@ def format_text_report(report: UpdateReport) -> str:
         "--- Protected Boundaries ---",
         "  + obsidian-memory: STRICTLY PRESERVED (Untouched)",
         "  + Obsidian Vaults: STRICTLY PRESERVED (Untouched)",
-        "  + Codex State:     STRICTLY PRESERVED (Untouched)",
+        "  + Codex Config:    ONLY cyber-health MCP entry managed; unrelated state preserved",
         "  + Source Repo:     STRICTLY PRESERVED (Untouched)",
         "============================================================",
     ]
@@ -617,6 +681,8 @@ def main(argv: list[str] | None = None) -> int:
             openclaw_bin=args.openclaw_bin,
             openclaw_config=args.openclaw_config,
             openclaw_state_dir=args.openclaw_state_dir,
+            codex_bin=args.codex_bin,
+            codex_home=args.codex_home,
             dry_run=args.dry_run,
             use_uv=not args.no_uv,
         )
