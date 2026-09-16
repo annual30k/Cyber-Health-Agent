@@ -1,5 +1,8 @@
 # Obsidian Memory Plugin
 
+> Cyber Health 的普通用户安装由 [Agent onboarding guide](../docs/agent-onboarding.md) 统一引导。
+> 本文档描述公共插件自身的宿主安装、规则和排障；不要把这些手动命令当作普通用户必须逐条执行的流程。
+
 将已有的 **obsidian-memory Skill 内置到 OpenClaw 与 Codex 插件**。
 插件负责加载入口与元数据配置；当前 Agent 按内置 Skill 建设与维护自生长知识库。
 

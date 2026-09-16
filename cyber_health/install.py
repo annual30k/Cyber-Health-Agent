@@ -30,6 +30,13 @@ from .codex_integration import (
     find_codex_cli,
     plan_codex_registration,
 )
+from .hermes_integration import (
+    HermesRegistrationStatus,
+    apply_hermes_registration,
+    find_hermes_cli,
+    plan_hermes_registration,
+)
+from .memory_bootstrap import MemoryBootstrapStatus, MemoryBootstrapper
 
 FIXED_OPENCLAW_SERVER_NAME = "cyber-health"
 DEFAULT_INSTALL_DIR_NAME = ".cyber-health"
@@ -234,13 +241,16 @@ class InstallReport:
     data: DataMigrationStatus
     openclaw: OpenClawRegistrationStatus
     codex: CodexRegistrationStatus = field(default_factory=CodexRegistrationStatus)
+    hermes: HermesRegistrationStatus = field(default_factory=HermesRegistrationStatus)
     memory: HealthManagerMemoryStatus = field(default_factory=HealthManagerMemoryStatus)
+    memory_bootstrap: MemoryBootstrapStatus = field(default_factory=MemoryBootstrapStatus)
     message: str = ""
     protected_boundaries: dict[str, bool] = field(
         default_factory=lambda: {
             "obsidian_memory_preserved": True,
             "obsidian_vaults_preserved": True,
             "unrelated_codex_state_preserved": True,
+            "unrelated_hermes_state_preserved": True,
             "source_repo_preserved": True,
         }
     )
@@ -257,11 +267,16 @@ class CyberHealthInstaller:
         openclaw_state_dir: Path | str | None = None,
         codex_bin: str | None | object = _DEFAULT_BIN,
         codex_home: Path | str | None = None,
+        hermes_bin: str | None | object = _DEFAULT_BIN,
+        hermes_home: Path | str | None = None,
+        memory_vault: Path | str | None = None,
+        memory_project_id: str | None = None,
         dry_run: bool = False,
         use_uv: bool = True,
         editable: bool = False,
         skip_openclaw: bool = False,
         skip_codex: bool = False,
+        skip_hermes: bool = False,
     ):
         # Resolve source project root
         if project_root is None:
@@ -320,12 +335,38 @@ class CyberHealthInstaller:
         else:
             self.codex_bin = str(codex_bin) if codex_bin else None
         self.codex_home = Path(codex_home) if codex_home else None
+        if hermes_bin is _DEFAULT_BIN:
+            self.hermes_bin = find_hermes_cli()
+        else:
+            self.hermes_bin = str(hermes_bin) if hermes_bin else None
+        self.hermes_home = Path(hermes_home) if hermes_home else None
 
         self.dry_run = dry_run
         self.use_uv = use_uv
         self.editable = editable
         self.skip_openclaw = skip_openclaw
         self.skip_codex = skip_codex
+        self.skip_hermes = skip_hermes
+        self.memory_vault = Path(memory_vault) if memory_vault else None
+        self.memory_project_id = memory_project_id
+        archives = sorted((self.project_root / "obsidian-memory-plugin").glob("obsidian-memory-plugin-*.tgz"))
+        packaged_archive = Path(__file__).resolve().parent / "assets" / "obsidian-memory-plugin-0.3.2.tgz"
+        self.memory_plugin_archive = (
+            archives[-1]
+            if archives
+            else packaged_archive
+            if packaged_archive.is_file()
+            else self.project_root / "obsidian-memory-plugin" / "obsidian-memory-plugin.tgz"
+        )
+        self.memory_bootstrapper = MemoryBootstrapper(
+            vault_path=self.memory_vault,
+            project_root=self.project_root,
+            openclaw_bin=self.openclaw_bin,
+            openclaw_env=self.get_openclaw_env(),
+            plugin_archive=self.memory_plugin_archive,
+            project_id=self.memory_project_id,
+            dry_run=self.dry_run,
+        )
 
         # Read version from pyproject.toml or fallback
         self.version = self._detect_version()
@@ -462,6 +503,24 @@ class CyberHealthInstaller:
             )
         return self.memory_status
 
+    def plan_memory_bootstrap(self) -> MemoryBootstrapStatus:
+        return self.memory_bootstrapper.plan()
+
+    @staticmethod
+    def planned_memory_status(bootstrap: MemoryBootstrapStatus) -> HealthManagerMemoryStatus:
+        return HealthManagerMemoryStatus(
+            state="planned",
+            vault_path=bootstrap.vault_path,
+            project_id=bootstrap.project_id,
+            project_path=bootstrap.project_path,
+            provider_args=[
+                "--memory-provider", "obsidian",
+                "--memory-vault", bootstrap.vault_path or "",
+                "--memory-project-id", bootstrap.project_id or "",
+            ],
+            reason="Memory bootstrap is planned from the explicitly selected Vault.",
+        )
+
     def plan_openclaw(self) -> OpenClawRegistrationStatus:
         """Inspects OpenClaw configuration state and plans registration."""
         status = OpenClawRegistrationStatus(name=FIXED_OPENCLAW_SERVER_NAME)
@@ -566,6 +625,20 @@ class CyberHealthInstaller:
             "",
             codex_home=self.codex_home,
             skip=self.skip_codex,
+        )
+
+    def plan_hermes(self) -> HermesRegistrationStatus:
+        """Inspect and plan Hermes using its native discovery-first MCP CLI."""
+        target_mcp = get_venv_bin_dir(self.venv_dir) / get_executable_name("cyber-health-mcp")
+        args = ["--db", str(self.target_db_path), "--allow-all", *self.memory_status.provider_args]
+        return plan_hermes_registration(
+            self.hermes_bin,
+            self.target_dir,
+            self.target_db_path,
+            str(target_mcp),
+            args,
+            hermes_home=self.hermes_home,
+            skip=self.skip_hermes,
         )
 
     def execute_data_migration(self, data_plan: DataMigrationStatus) -> None:
@@ -774,7 +847,22 @@ class CyberHealthInstaller:
             dry_run=self.dry_run,
         )
 
-    def write_installation_metadata(self, codex_status: CodexRegistrationStatus) -> None:
+    def register_hermes(self, hermes_status: HermesRegistrationStatus) -> None:
+        apply_hermes_registration(
+            self.hermes_bin,
+            hermes_status,
+            self.target_dir,
+            self.target_db_path,
+            hermes_home=self.hermes_home,
+            dry_run=self.dry_run,
+        )
+
+    def write_installation_metadata(
+        self,
+        codex_status: CodexRegistrationStatus,
+        hermes_status: HermesRegistrationStatus,
+        memory_bootstrap: MemoryBootstrapStatus,
+    ) -> None:
         """Records installation metadata to config/installation.json."""
         if self.dry_run:
             return
@@ -790,9 +878,16 @@ class CyberHealthInstaller:
             "mcp_executable": str(get_venv_bin_dir(self.venv_dir) / get_executable_name("cyber-health-mcp")),
             "editable": self.editable,
             "memory": self.memory_status.to_dict(),
+            "memory_bootstrap": memory_bootstrap.to_dict(),
             "codex": {
                 "name": codex_status.name,
                 "registered": codex_status.executed or codex_status.action == "update",
+            },
+            "hermes": {
+                "name": hermes_status.name,
+                "registered": hermes_status.executed or hermes_status.action == "verify",
+                "probe_verified": hermes_status.probe_verified,
+                "tool_count": hermes_status.tool_count,
             },
         }
 
@@ -806,6 +901,7 @@ class CyberHealthInstaller:
         data_plan: DataMigrationStatus,
         openclaw_plan: OpenClawRegistrationStatus,
         codex_plan: CodexRegistrationStatus,
+        hermes_plan: HermesRegistrationStatus,
     ) -> Path | None:
         """Persist a non-destructive recovery marker for a partial install."""
         if self.dry_run or not self.target_dir.exists():
@@ -827,6 +923,8 @@ class CyberHealthInstaller:
                         "openclaw_executed": openclaw_plan.executed,
                         "codex_action": codex_plan.action,
                         "codex_executed": codex_plan.executed,
+                        "hermes_action": hermes_plan.action,
+                        "hermes_executed": hermes_plan.executed,
                         "memory": self.memory_status.to_dict(),
                         "target_dir": str(self.target_dir),
                         "user_data_preserved": True,
@@ -844,9 +942,14 @@ class CyberHealthInstaller:
     def run(self) -> InstallReport:
         # Phase 1: Planning and inspection, including safe source WAL normalization.
         data_plan = self.plan_data_migration()
+        memory_bootstrap_plan = self.plan_memory_bootstrap()
         memory_plan = self.plan_memory()
+        if memory_bootstrap_plan.requested and memory_bootstrap_plan.reason == "Memory bootstrap plan validated":
+            memory_plan = self.planned_memory_status(memory_bootstrap_plan)
+            self.memory_status = memory_plan
         openclaw_plan = self.plan_openclaw()
         codex_plan = self.plan_codex()
+        hermes_plan = self.plan_hermes()
 
         # Phase 2: Fail-closed validation check
         refusal_reasons: list[str] = []
@@ -856,6 +959,17 @@ class CyberHealthInstaller:
             refusal_reasons.append(f"OpenClaw registration error: {openclaw_plan.reason}")
         if codex_plan.action in ("error", "refused"):
             refusal_reasons.append(f"Codex registration error: {codex_plan.reason}")
+        if hermes_plan.action in ("error", "refused"):
+            refusal_reasons.append(f"Hermes registration error: {hermes_plan.reason}")
+        if memory_bootstrap_plan.requested and any(
+            action in ("error", "install-required") for action in (
+                memory_bootstrap_plan.obsidian_action,
+                memory_bootstrap_plan.plugin_action,
+                memory_bootstrap_plan.vault_action,
+                memory_bootstrap_plan.config_action,
+            )
+        ):
+            refusal_reasons.append(f"Memory bootstrap error: {memory_bootstrap_plan.reason}")
 
         if refusal_reasons:
             return InstallReport(
@@ -868,7 +982,9 @@ class CyberHealthInstaller:
                 data=data_plan,
                 openclaw=openclaw_plan,
                 codex=codex_plan,
+                hermes=hermes_plan,
                 memory=memory_plan,
+                memory_bootstrap=memory_bootstrap_plan,
                 message="; ".join(refusal_reasons),
             )
 
@@ -884,7 +1000,9 @@ class CyberHealthInstaller:
                 data=data_plan,
                 openclaw=openclaw_plan,
                 codex=codex_plan,
+                hermes=hermes_plan,
                 memory=memory_plan,
+                memory_bootstrap=memory_bootstrap_plan,
                 message="Dry run completed successfully (zero mutations)",
             )
 
@@ -895,17 +1013,24 @@ class CyberHealthInstaller:
             self.setup_environment()
             phase = "data_migration"
             self.execute_data_migration(data_plan)
+            phase = "memory_bootstrap"
+            if memory_bootstrap_plan.requested:
+                self.memory_status = self.memory_bootstrapper.apply(memory_bootstrap_plan)
             phase = "openclaw_registration"
             self.register_openclaw(openclaw_plan)
             phase = "codex_registration"
             self.register_codex(codex_plan)
+            phase = "hermes_registration"
+            self.register_hermes(hermes_plan)
             phase = "metadata"
-            self.write_installation_metadata(codex_plan)
+            self.write_installation_metadata(codex_plan, hermes_plan, memory_bootstrap_plan)
             failure_marker = self.config_dir / "install-failure.json"
             if failure_marker.exists():
                 failure_marker.unlink()
         except Exception as exc:
-            marker = self.write_installation_failure_marker(phase, exc, data_plan, openclaw_plan, codex_plan)
+            marker = self.write_installation_failure_marker(
+                phase, exc, data_plan, openclaw_plan, codex_plan, hermes_plan
+            )
             marker_note = f" Recovery marker: {marker}." if marker else " Recovery marker could not be written."
             return InstallReport(
                 dry_run=False,
@@ -917,7 +1042,9 @@ class CyberHealthInstaller:
                 data=data_plan,
                 openclaw=openclaw_plan,
                 codex=codex_plan,
-                memory=memory_plan,
+                hermes=hermes_plan,
+                memory=self.memory_status,
+                memory_bootstrap=memory_bootstrap_plan,
                 message=(
                     f"Installation failed during {phase}: {exc}. "
                     "A partial installation may remain, but any existing user data was preserved; "
@@ -936,7 +1063,9 @@ class CyberHealthInstaller:
             data=data_plan,
             openclaw=openclaw_plan,
             codex=codex_plan,
-            memory=memory_plan,
+            hermes=hermes_plan,
+            memory=self.memory_status,
+            memory_bootstrap=memory_bootstrap_plan,
             message="Installation completed successfully",
         )
 
@@ -984,6 +1113,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--codex-bin", type=str, default=_DEFAULT_BIN, help="Codex CLI binary path override.")
     parser.add_argument("--codex-home", type=str, default=None, help="Codex home override (primarily for isolated testing).")
+    parser.add_argument("--hermes-bin", type=str, default=_DEFAULT_BIN, help="Hermes CLI binary path override.")
+    parser.add_argument("--hermes-home", type=str, default=None, help="Hermes home override (primarily for isolated testing).")
+    parser.add_argument("--memory-vault", type=str, default=None, help="Explicit Obsidian Vault path to initialize and bind for health-manager memory.")
+    parser.add_argument("--memory-project-id", type=str, default=None, help="Optional explicit health-manager project ID inside the selected Vault.")
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -1010,6 +1143,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip registering or updating OpenClaw MCP server configuration.",
     )
     parser.add_argument("--skip-codex", action="store_true", help="Skip Codex MCP registration.")
+    parser.add_argument("--skip-hermes", action="store_true", help="Skip Hermes MCP registration.")
     return parser
 
 
@@ -1053,6 +1187,17 @@ def format_text_report(report: InstallReport) -> str:
         f"Reason       : {report.codex.reason}",
         f"Executed     : {report.codex.executed}",
         "",
+        "--- Hermes Integration ---",
+        f"Server Name  : {report.hermes.name}",
+        f"Detected     : {report.hermes.detected}",
+        f"Action       : {report.hermes.action}",
+        f"Command      : {report.hermes.command}",
+        f"Args         : {' '.join(report.hermes.args)}",
+        f"Probe        : {report.hermes.probe_verified}",
+        f"Tool Count   : {report.hermes.tool_count or 'N/A'}",
+        f"Reason       : {report.hermes.reason}",
+        f"Executed     : {report.hermes.executed}",
+        "",
         "--- Health-Manager Long-Term Memory ---",
         f"State        : {report.memory.state}",
         f"Plugin       : {report.memory.plugin_id} (loaded={report.memory.plugin_loaded})",
@@ -1061,10 +1206,21 @@ def format_text_report(report: InstallReport) -> str:
         f"Reason       : {report.memory.reason}",
         *[f"Warning      : {warning}" for warning in report.memory.warnings],
         "",
+        "--- Memory Bootstrap ---",
+        f"Requested    : {report.memory_bootstrap.requested}",
+        f"Obsidian     : {report.memory_bootstrap.obsidian_action}",
+        f"Obsidian App : {report.memory_bootstrap.obsidian_app_path or 'N/A'}",
+        f"Vault Action : {report.memory_bootstrap.vault_action}",
+        f"Plugin Action: {report.memory_bootstrap.plugin_action}",
+        f"Config Action: {report.memory_bootstrap.config_action}",
+        f"Executed     : {report.memory_bootstrap.executed}",
+        f"Reason       : {report.memory_bootstrap.reason}",
+        "",
         "--- Protected Boundaries ---",
         "  + obsidian-memory: STRICTLY PRESERVED (Untouched)",
         "  + Obsidian Vaults: STRICTLY PRESERVED (Untouched)",
         "  + Codex Config:    ONLY cyber-health MCP entry managed; unrelated state preserved",
+        "  + Hermes Config:   ONLY cyber-health MCP entry managed; unrelated state preserved",
         "  + Source Repo:     STRICTLY PRESERVED (Untouched)",
         "============================================================",
     ]
@@ -1085,11 +1241,16 @@ def main(argv: list[str] | None = None) -> int:
             openclaw_state_dir=args.openclaw_state_dir,
             codex_bin=args.codex_bin,
             codex_home=args.codex_home,
+            hermes_bin=args.hermes_bin,
+            hermes_home=args.hermes_home,
+            memory_vault=args.memory_vault,
+            memory_project_id=args.memory_project_id,
             dry_run=args.dry_run,
             use_uv=not args.no_uv,
             editable=args.editable,
             skip_openclaw=args.skip_openclaw,
             skip_codex=args.skip_codex,
+            skip_hermes=args.skip_hermes,
         )
         report = installer.run()
     except Exception as exc:

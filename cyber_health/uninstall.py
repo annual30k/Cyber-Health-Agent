@@ -1,9 +1,9 @@
 """Production-safe Cyber Health Agent uninstaller.
 
-Unregisters owned host integrations (OpenClaw/Codex MCP entries, LaunchAgent) while
+Unregisters owned host integrations (OpenClaw/Codex/Hermes MCP entries, LaunchAgent) while
 preserving database, WAL/SHM, exports, source, .venv, and user data by default.
 Guarantees strict non-interference with obsidian-memory, Obsidian Vaults,
-and unrelated Codex state.
+and unrelated host state.
 """
 
 from __future__ import annotations
@@ -27,6 +27,12 @@ from .codex_integration import (
     find_codex_cli,
     inspect_codex_registration,
     remove_codex_registration,
+)
+from .hermes_integration import (
+    HermesRegistrationStatus,
+    find_hermes_cli,
+    inspect_hermes_registration,
+    remove_hermes_registration,
 )
 
 PURGE_CONFIRMATION_TOKEN = "DELETE_CYBER_HEALTH_DATA"
@@ -145,6 +151,7 @@ class UninstallReport:
     project_root: str
     openclaw: HostIntegrationStatus
     codex: CodexRegistrationStatus
+    hermes: HermesRegistrationStatus
     launchagent: HostIntegrationStatus
     data: DataPreservationStatus
     protected_boundaries: dict[str, bool] = field(
@@ -152,6 +159,7 @@ class UninstallReport:
             "obsidian_memory_preserved": True,
             "obsidian_vaults_preserved": True,
             "unrelated_codex_state_preserved": True,
+            "unrelated_hermes_state_preserved": True,
             "source_and_venv_preserved": True,
         }
     )
@@ -171,6 +179,8 @@ class CyberHealthUninstaller:
         openclaw_state_dir: Path | str | None = None,
         codex_bin: str | None | object = _DEFAULT_BIN,
         codex_home: Path | str | None = None,
+        hermes_bin: str | None | object = _DEFAULT_BIN,
+        hermes_home: Path | str | None = None,
         launchagent_dir: Path | str | None = None,
         launchagent_label: str = DEFAULT_LAUNCHAGENT_LABEL,
         force_foreign_host_mcp: bool = False,
@@ -214,6 +224,11 @@ class CyberHealthUninstaller:
         else:
             self.codex_bin = str(codex_bin) if codex_bin else None
         self.codex_home = Path(codex_home) if codex_home else None
+        if hermes_bin is _DEFAULT_BIN:
+            self.hermes_bin = find_hermes_cli()
+        else:
+            self.hermes_bin = str(hermes_bin) if hermes_bin else None
+        self.hermes_home = Path(hermes_home) if hermes_home else None
 
         if launchagent_dir is not None:
             self.launchagent_dir = Path(launchagent_dir)
@@ -481,6 +496,31 @@ class CyberHealthUninstaller:
                 self.installed_root,
                 self.installed_root / "data" / "cyber-health.sqlite3",
                 codex_home=self.codex_home,
+                dry_run=self.dry_run,
+            )
+        except RuntimeError as exc:
+            raise OwnershipVerificationError(str(exc)) from exc
+
+    def inspect_hermes(self) -> HermesRegistrationStatus:
+        status = inspect_hermes_registration(
+            self.hermes_bin,
+            self.installed_root,
+            self.installed_root / "data" / "cyber-health.sqlite3",
+            hermes_home=self.hermes_home,
+        )
+        if status.action == "verify":
+            status.action = "remove"
+            status.reason = "Verified owned Cyber Health Hermes MCP registration"
+        return status
+
+    def unregister_hermes(self, status: HermesRegistrationStatus) -> None:
+        try:
+            remove_hermes_registration(
+                self.hermes_bin,
+                status,
+                self.installed_root,
+                self.installed_root / "data" / "cyber-health.sqlite3",
+                hermes_home=self.hermes_home,
                 dry_run=self.dry_run,
             )
         except RuntimeError as exc:
@@ -813,6 +853,7 @@ class CyberHealthUninstaller:
         self,
         openclaw_status: HostIntegrationStatus,
         codex_status: CodexRegistrationStatus,
+        hermes_status: HermesRegistrationStatus,
         launchagent_status: HostIntegrationStatus,
         data_status: DataPreservationStatus,
     ) -> None:
@@ -836,6 +877,16 @@ class CyberHealthUninstaller:
             ):
                 raise OwnershipVerificationError(
                     "Codex registration changed after planning; refusing all mutations"
+                )
+
+        if hermes_status.action == "remove":
+            fresh_hermes = self.inspect_hermes()
+            if (
+                fresh_hermes.action != "remove"
+                or fresh_hermes.state_fingerprint != hermes_status.state_fingerprint
+            ):
+                raise OwnershipVerificationError(
+                    "Hermes registration changed after planning; refusing all mutations"
                 )
 
         if launchagent_status.action == "unload_and_remove":
@@ -870,6 +921,7 @@ class CyberHealthUninstaller:
         # Phase 1: Planning and inspection (strictly read-only)
         openclaw_status = self.inspect_openclaw()
         codex_status = self.inspect_codex()
+        hermes_status = self.inspect_hermes()
         launchagent_status = self.inspect_launchagent()
         data_plan = self.plan_data()
 
@@ -879,6 +931,8 @@ class CyberHealthUninstaller:
             refusal_reasons.append(f"OpenClaw registration refused: {openclaw_status.reason}")
         if codex_status.action in ("error", "refused"):
             refusal_reasons.append(f"Codex registration refused: {codex_status.reason}")
+        if hermes_status.action in ("error", "refused"):
+            refusal_reasons.append(f"Hermes registration refused: {hermes_status.reason}")
         if launchagent_status.action in ("error", "refused"):
             refusal_reasons.append(f"LaunchAgent removal refused: {launchagent_status.reason}")
         if data_plan.errors:
@@ -892,6 +946,7 @@ class CyberHealthUninstaller:
                 project_root=str(self.project_root),
                 openclaw=openclaw_status,
                 codex=codex_status,
+                hermes=hermes_status,
                 launchagent=launchagent_status,
                 data=data_plan,
                 message="; ".join(refusal_reasons),
@@ -905,15 +960,19 @@ class CyberHealthUninstaller:
                 project_root=str(self.project_root),
                 openclaw=openclaw_status,
                 codex=codex_status,
+                hermes=hermes_status,
                 launchagent=launchagent_status,
                 data=data_plan,
                 message="Dry run completed successfully (zero mutations)",
             )
 
         # Phase 4: Execution
-        self.preflight_execution(openclaw_status, codex_status, launchagent_status, data_plan)
+        self.preflight_execution(
+            openclaw_status, codex_status, hermes_status, launchagent_status, data_plan
+        )
         self.unregister_openclaw(openclaw_status)
         self.unregister_codex(codex_status)
+        self.unregister_hermes(hermes_status)
         self.remove_launchagent(launchagent_status)
         self.execute_data_purge(data_plan)
 
@@ -923,6 +982,7 @@ class CyberHealthUninstaller:
             project_root=str(self.project_root),
             openclaw=openclaw_status,
             codex=codex_status,
+            hermes=hermes_status,
             launchagent=launchagent_status,
             data=data_plan,
             message="Uninstallation completed successfully",
@@ -987,6 +1047,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--codex-bin", type=str, default=_DEFAULT_BIN, help="Codex CLI binary path override.")
     parser.add_argument("--codex-home", type=str, default=None, help="Codex home override (primarily for isolated testing).")
+    parser.add_argument("--hermes-bin", type=str, default=_DEFAULT_BIN, help="Hermes CLI binary path override.")
+    parser.add_argument("--hermes-home", type=str, default=None, help="Hermes home override (primarily for isolated testing).")
     parser.add_argument(
         "--launchagent-dir",
         type=str,
@@ -1031,6 +1093,13 @@ def format_text_report(report: UninstallReport) -> str:
         f"  Reason          : {report.codex.reason}",
         f"  Executed        : {report.codex.executed}",
         "",
+        f"Hermes MCP Server ({report.hermes.name}):",
+        f"  Detected        : {report.hermes.detected}",
+        f"  Ownership Proven: {report.hermes.ownership_proven}",
+        f"  Action          : {report.hermes.action}",
+        f"  Reason          : {report.hermes.reason}",
+        f"  Executed        : {report.hermes.executed}",
+        "",
         f"LaunchAgent ({report.launchagent.name}):",
         f"  Detected        : {report.launchagent.detected}",
         f"  Ownership Proven: {report.launchagent.ownership_proven}",
@@ -1064,6 +1133,7 @@ def format_text_report(report: UninstallReport) -> str:
         "  + obsidian-memory: STRICTLY PRESERVED (Not a Cyber Health component)",
         "  + Obsidian Vaults: STRICTLY PRESERVED (Untouched)",
         "  + Codex Config:    ONLY cyber-health MCP entry managed; unrelated state preserved",
+        "  + Hermes Config:   ONLY cyber-health MCP entry managed; unrelated state preserved",
         "  + Source & .venv:  STRICTLY PRESERVED (Untouched)",
         "============================================================",
     ])
@@ -1083,6 +1153,8 @@ def main(argv: list[str] | None = None) -> int:
             openclaw_state_dir=args.openclaw_state_dir,
             codex_bin=args.codex_bin,
             codex_home=args.codex_home,
+            hermes_bin=args.hermes_bin,
+            hermes_home=args.hermes_home,
             launchagent_dir=args.launchagent_dir,
             force_foreign_host_mcp=args.force_foreign_host_mcp,
             confirm_foreign_unset=args.confirm_foreign_unset,

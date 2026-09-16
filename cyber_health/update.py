@@ -40,6 +40,11 @@ from .uninstall import verify_cyber_health_command_signature
 from .health_memory import HealthManagerMemoryStatus, inspect_health_manager_memory
 from .obsidian_memory_provider import ObsidianMemoryProvider
 from .codex_integration import apply_codex_registration, find_codex_cli, plan_codex_registration
+from .hermes_integration import (
+    apply_hermes_registration,
+    find_hermes_cli,
+    plan_hermes_registration,
+)
 
 _DEFAULT_BIN = object()
 
@@ -74,12 +79,14 @@ class UpdateReport:
     schema_verified: bool = False
     openclaw_verified: bool = False
     codex_verified: bool = False
+    hermes_verified: bool = False
     message: str = ""
     protected_boundaries: dict[str, bool] = field(
         default_factory=lambda: {
             "obsidian_memory_preserved": True,
             "obsidian_vaults_preserved": True,
             "unrelated_codex_state_preserved": True,
+            "unrelated_hermes_state_preserved": True,
             "source_repo_preserved": True,
         }
     )
@@ -95,6 +102,8 @@ class CyberHealthUpdater:
         openclaw_state_dir: Path | str | None = None,
         codex_bin: str | None | object = _DEFAULT_BIN,
         codex_home: Path | str | None = None,
+        hermes_bin: str | None | object = _DEFAULT_BIN,
+        hermes_home: Path | str | None = None,
         dry_run: bool = False,
         use_uv: bool = True,
     ):
@@ -136,6 +145,11 @@ class CyberHealthUpdater:
         else:
             self.codex_bin = str(codex_bin) if codex_bin else None
         self.codex_home = Path(codex_home) if codex_home else None
+        if hermes_bin is _DEFAULT_BIN:
+            self.hermes_bin = find_hermes_cli()
+        else:
+            self.hermes_bin = str(hermes_bin) if hermes_bin else None
+        self.hermes_home = Path(hermes_home) if hermes_home else None
 
         self.dry_run = dry_run
         self.use_uv = use_uv
@@ -447,6 +461,33 @@ class CyberHealthUpdater:
         except Exception:
             return False
 
+    def verify_hermes(self) -> bool:
+        """Verify or refresh Hermes and require real tool discovery."""
+        target_mcp = get_venv_bin_dir(self.venv_dir) / get_executable_name("cyber-health-mcp")
+        expected_args = ["--db", str(self.target_db_path), "--allow-all", *self.memory_status.provider_args]
+        status = plan_hermes_registration(
+            self.hermes_bin,
+            self.target_dir,
+            self.target_db_path,
+            str(target_mcp),
+            expected_args,
+            hermes_home=self.hermes_home,
+        )
+        if status.action in ("error", "refused"):
+            return False
+        try:
+            apply_hermes_registration(
+                self.hermes_bin,
+                status,
+                self.target_dir,
+                self.target_db_path,
+                hermes_home=self.hermes_home,
+                dry_run=self.dry_run,
+            )
+            return True
+        except Exception:
+            return False
+
     def update_metadata(self, old_meta: dict[str, Any], backup_status: BackupStatus) -> None:
         """Updates config/installation.json with new version details."""
         if self.dry_run:
@@ -460,6 +501,10 @@ class CyberHealthUpdater:
         old_meta["codex"] = {
             "name": "cyber-health",
             "registered": bool(self.codex_bin),
+        }
+        old_meta["hermes"] = {
+            "name": "cyber-health",
+            "registered": bool(self.hermes_bin),
         }
 
         meta_file = self.config_dir / "installation.json"
@@ -545,6 +590,28 @@ class CyberHealthUpdater:
                     ),
                 )
 
+            hermes_ok = self.verify_hermes()
+            if not hermes_ok:
+                return UpdateReport(
+                    dry_run=self.dry_run,
+                    success=False,
+                    target_dir=str(self.target_dir),
+                    old_version=old_version,
+                    new_version=self.new_version,
+                    backup=backup_status,
+                    memory=self.memory_status,
+                    package_updated=pkg_updated,
+                    schema_verified=schema_ok,
+                    openclaw_verified=True,
+                    codex_verified=True,
+                    hermes_verified=False,
+                    message=(
+                        "Update aborted (fail-closed): Hermes registration verification failed. "
+                        "The package may already have been upgraded; the verified database "
+                        f"backup is available at {backup_status.backup_file or 'the backup directory'}."
+                    ),
+                )
+
             self.update_metadata(old_meta, backup_status)
 
             return UpdateReport(
@@ -559,6 +626,7 @@ class CyberHealthUpdater:
                 schema_verified=True,
                 openclaw_verified=True,
                 codex_verified=True,
+                hermes_verified=True,
                 message="Update completed successfully",
             )
         except Exception as exc:
@@ -611,6 +679,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--codex-bin", type=str, default=_DEFAULT_BIN, help="Codex CLI binary path override.")
     parser.add_argument("--codex-home", type=str, default=None, help="Codex home override (primarily for isolated testing).")
+    parser.add_argument("--hermes-bin", type=str, default=_DEFAULT_BIN, help="Hermes CLI binary path override.")
+    parser.add_argument("--hermes-home", type=str, default=None, help="Hermes home override (primarily for isolated testing).")
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -651,6 +721,7 @@ def format_text_report(report: UpdateReport) -> str:
         f"Schema Verified  : {report.schema_verified}",
         f"OpenClaw Verified: {report.openclaw_verified}",
         f"Codex Verified   : {report.codex_verified}",
+        f"Hermes Verified  : {report.hermes_verified}",
         "",
         "--- Health-Manager Long-Term Memory ---",
         f"State            : {report.memory.state}",
@@ -664,6 +735,7 @@ def format_text_report(report: UpdateReport) -> str:
         "  + obsidian-memory: STRICTLY PRESERVED (Untouched)",
         "  + Obsidian Vaults: STRICTLY PRESERVED (Untouched)",
         "  + Codex Config:    ONLY cyber-health MCP entry managed; unrelated state preserved",
+        "  + Hermes Config:   ONLY cyber-health MCP entry managed; unrelated state preserved",
         "  + Source Repo:     STRICTLY PRESERVED (Untouched)",
         "============================================================",
     ]
@@ -683,6 +755,8 @@ def main(argv: list[str] | None = None) -> int:
             openclaw_state_dir=args.openclaw_state_dir,
             codex_bin=args.codex_bin,
             codex_home=args.codex_home,
+            hermes_bin=args.hermes_bin,
+            hermes_home=args.hermes_home,
             dry_run=args.dry_run,
             use_uv=not args.no_uv,
         )

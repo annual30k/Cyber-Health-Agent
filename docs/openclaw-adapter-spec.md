@@ -2,9 +2,12 @@
 
 **状态：** 当前 P0 运行契约
 
-**适用版本：** Cyber Health Core / MCP v0.2.7；OpenClaw 当前 MCP Registry 机制
+**适用版本：** Cyber Health Core / MCP v0.2.9；OpenClaw 当前 MCP Registry 机制
 
 **范围：** 单用户、本地优先、一个共享 SQLite 事实库、OpenClaw 作为首个宿主。
+
+普通用户的确认顺序、Vault 项目隔离与跨宿主准确呈现见
+[Agent onboarding guide](agent-onboarding.md)。本规范只定义 OpenClaw 的低层契约。
 
 ## 1. 目标与边界
 
@@ -178,13 +181,26 @@ Agent 对 warning 的处理必须是可操作的：提示用户安装/启用 `ob
 运行安装器。Cyber Health 不应静默修改插件配置、替用户选择 Vault，也不应把未检查状态当成
 已连接。
 
+### 用户同意长期记忆后的引导式初始化
+
+只有用户明确同意长期记忆、并提供 `--memory-vault` 时，安装器才获授权操作共享插件和该 Vault。
+首先检查本机是否已安装 Obsidian；缺失时返回 `install-required`，不安装插件、不修改配置、也不创建
+任何 Vault 文件，调用它的 Agent 必须先提示用户安装 Obsidian 并打开/创建选定 Vault。Obsidian 已就绪
+后，安装器才可以安装缺失的公共 `obsidian-memory-plugin`，并只追加 `health-manager` 的配置。
+
+Cyber Health 的项目单元固定在 `20-Projects/Cyber-Health-Agent-<stable-id>/`；稳定 ID 由选定 Vault
+物理路径派生。它在 `projects.yaml` 中以 `roots: []`、`scope: private` 注册，且只创建本项目所需的
+`inbox`、`raw`、`wiki`、`checkpoints`、`index`、`log` 与项目规则。已有插件配置中的其他 `agentConfigs`、
+其他项目目录、历史记忆和 Vault 根目录的用户内容不得被覆盖或迁移。已有不同的 `health-manager` 绑定
+必须失败关闭。
+
 只有上述边界全部验证通过，才把 Cyber Health 的 Provider 接到同一个
 `health-manager` project。注册 `cyber-health` MCP 时追加等价参数：
 
 ```text
 --memory-provider obsidian
 --memory-vault /absolute/path/to/My Vault
---memory-project-id cyber-health-agent
+--memory-project-id Cyber-Health-Agent-<stable-id>
 ```
 
 这会让 Cyber Health 创建自己的 `ObsidianMemoryProvider`，其读写范围是该 project；不应把
