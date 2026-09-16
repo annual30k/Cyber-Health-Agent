@@ -145,6 +145,8 @@ def is_system_broad_or_drive_root(path: Path) -> bool:
         # when a caller supplies a path-like implementation.
         if resolved.anchor and len(resolved.parts) == 1:
             return True
+        if resolved.name.lower() == "users" and resolved.parent == Path(resolved.anchor):
+            return True
         win_dir = os.environ.get("WINDIR", "C:\\Windows")
         prog_files = os.environ.get("ProgramFiles", "C:\\Program Files")
         prog_files_x86 = os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")

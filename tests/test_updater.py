@@ -14,7 +14,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from cyber_health.install import compute_sha256, verify_sqlite_integrity
+from cyber_health.install import compute_sha256, get_executable_name, get_venv_bin_dir, verify_sqlite_integrity
 from cyber_health.update import (
     CyberHealthUpdater,
     UpdateBackupError,
@@ -364,7 +364,7 @@ class TestCyberHealthUpdater(BaseUpdaterFixture):
             openclaw_bin="/fake/bin/openclaw",
             dry_run=False,
         )
-        target_mcp = str(updater.venv_dir / "bin" / "cyber-health-mcp")
+        target_mcp = str(get_venv_bin_dir(updater.venv_dir) / get_executable_name("cyber-health-mcp"))
         current_data = {
             "command": target_mcp,
             "args": ["--db", str(updater.target_db_path), "--allow-all"],

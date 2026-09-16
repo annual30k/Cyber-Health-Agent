@@ -1089,16 +1089,16 @@ class TestTrashDestinationSafety(BaseFakeHostTest):
         fake_home.mkdir()
         fake_trash = fake_home / ".Trash"
         fake_trash.mkdir()
-        # Make ~/.Trash non-writable to trigger project-local fallback
-        os.chmod(fake_trash, 0o444)
-
         # Create a symlinked .trash inside project root pointing outside
         outside_trash = self.test_dir / "outside_trash"
         outside_trash.mkdir()
         local_trash = self.project_root / ".trash"
         local_trash.symlink_to(outside_trash)
 
-        with mock.patch("pathlib.Path.home", return_value=fake_home):
+        with (
+            mock.patch("pathlib.Path.home", return_value=fake_home),
+            mock.patch("os.access", return_value=False),
+        ):
             uninstaller = CyberHealthUninstaller(
                 project_root=self.project_root,
                 db_path=self.db_path,
@@ -1111,12 +1111,8 @@ class TestTrashDestinationSafety(BaseFakeHostTest):
 
             # Execution of purge should fail closed due to symlinked trash destination
             plan = uninstaller.plan_data()
-            try:
-                with self.assertRaises(PurgeValidationError):
-                    uninstaller.execute_data_purge(plan)
-            finally:
-                # Restore permissions so cleanup works
-                os.chmod(fake_trash, 0o755)
+            with self.assertRaises(PurgeValidationError):
+                uninstaller.execute_data_purge(plan)
 
 
 if __name__ == "__main__":
