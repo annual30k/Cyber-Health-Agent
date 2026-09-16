@@ -69,6 +69,10 @@ SYSTEM_BROAD_PATHS = {
     Path("/Applications"),
     Path("/Volumes"),
 }
+# Keep this concrete path at import time.  Some callers (and our Windows-path
+# simulation tests) temporarily replace ``pathlib.Path``; calling ``Path.home``
+# while that replacement is active is not supported by Python 3.11.
+USER_HOME_PATH = Path.home()
 
 _DEFAULT_BIN = object()
 
@@ -132,11 +136,14 @@ def is_system_broad_or_drive_root(path: Path) -> bool:
     except Exception:
         resolved = path
 
-    if resolved in SYSTEM_BROAD_PATHS or resolved == Path.home():
+    if resolved in SYSTEM_BROAD_PATHS or resolved == USER_HOME_PATH:
         return True
 
     if sys.platform == "win32":
-        if resolved == Path(resolved.anchor):
+        # A Windows drive root has exactly its anchor as the sole path part.
+        # Avoid constructing another Path here so this check also remains safe
+        # when a caller supplies a path-like implementation.
+        if resolved.anchor and len(resolved.parts) == 1:
             return True
         win_dir = os.environ.get("WINDIR", "C:\\Windows")
         prog_files = os.environ.get("ProgramFiles", "C:\\Program Files")

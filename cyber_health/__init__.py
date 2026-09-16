@@ -1,6 +1,6 @@
 """Cyber Health domain core."""
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 from .errors import (
     ConflictError,
