@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -265,8 +266,7 @@ class TestCodexScheduleSync(unittest.TestCase):
         from mcp.client.stdio import StdioServerParameters, stdio_client
 
         async def _run():
-            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            py_bin = os.path.join(root, ".venv", "bin", "python")
+            py_bin = sys.executable
             server_params = StdioServerParameters(
                 command=py_bin,
                 args=["-m", "cyber_health_mcp", "--allow-all"],

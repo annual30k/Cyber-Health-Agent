@@ -49,8 +49,11 @@ class ActiveMemorySuggestionTests(unittest.TestCase):
         self.assertTrue(suggestion["requires_user_confirmation"])
         self.assertEqual(before["state_version"], after["state_version"])
 
-        with sqlite3.connect(self.service.store.database_path) as conn:
+        conn = sqlite3.connect(self.service.store.database_path)
+        try:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM memory_outbox").fetchone()[0], 0)
+        finally:
+            conn.close()
 
     def test_single_fact_does_not_trigger_and_suggestion_is_pure_read(self) -> None:
         self.service.log_meal(

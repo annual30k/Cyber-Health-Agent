@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import os
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -309,8 +310,7 @@ class TestCodexReviewRound13(unittest.TestCase):
         from mcp.client.stdio import StdioServerParameters, stdio_client
 
         async def _run():
-            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            py_bin = os.path.join(root, ".venv", "bin", "python")
+            py_bin = sys.executable
             server_params = StdioServerParameters(
                 command=py_bin,
                 args=["-m", "cyber_health_mcp", "--allow-all"],
@@ -377,8 +377,7 @@ class TestCodexReviewRound13(unittest.TestCase):
         from mcp.client.stdio import StdioServerParameters, stdio_client
 
         async def _run():
-            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            py_bin = os.path.join(root, ".venv", "bin", "python")
+            py_bin = sys.executable
             # Without CYBER_HEALTH_MOCK_MEMORY: tests true unenabled host state
             server_params = StdioServerParameters(
                 command=py_bin,
