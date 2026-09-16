@@ -13,6 +13,7 @@ from cyber_health.codex_integration import (
     plan_codex_registration,
     remove_codex_registration,
 )
+from test_support import make_python_command
 
 
 class CodexIntegrationTests(unittest.TestCase):
@@ -24,8 +25,9 @@ class CodexIntegrationTests(unittest.TestCase):
         self.command = self.target / "venv" / "bin" / "cyber-health-mcp"
         self.state = self.root / "state.json"
         self.state.write_text(json.dumps({"servers": {}, "unrelated": {"keep": True}}))
-        script = self.root / "codex"
-        script.write_text(
+        script = make_python_command(
+            self.root,
+            "codex",
             textwrap.dedent(
                 f"""\
                 #!/usr/bin/env python3
@@ -51,9 +53,8 @@ class CodexIntegrationTests(unittest.TestCase):
                 else:
                     raise SystemExit(2)
                 """
-            )
+            ),
         )
-        script.chmod(0o755)
         self.codex = str(script)
 
     def tearDown(self) -> None:

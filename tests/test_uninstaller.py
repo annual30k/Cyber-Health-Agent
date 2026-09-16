@@ -31,6 +31,7 @@ from cyber_health.uninstall import (
     format_text_report,
     main,
 )
+from test_support import make_python_command
 
 
 class BaseFakeHostTest(unittest.TestCase):
@@ -83,14 +84,12 @@ class BaseFakeHostTest(unittest.TestCase):
         })
 
         # Fake OpenClaw executable script
-        self.fake_openclaw_bin = self.bin_dir / "openclaw"
-        self._create_fake_openclaw_binary()
+        self.fake_openclaw_bin = self._create_fake_openclaw_binary()
 
         # State tracking for fake launchctl
         self.fake_launchctl_calls_file = self.test_dir / "fake_launchctl_calls.json"
         self.fake_launchctl_calls_file.write_text("[]")
-        self.fake_launchctl_bin = self.bin_dir / "launchctl"
-        self._create_fake_launchctl_binary()
+        self.fake_launchctl_bin = self._create_fake_launchctl_binary()
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -108,8 +107,7 @@ class BaseFakeHostTest(unittest.TestCase):
             return []
         return json.loads(self.fake_openclaw_calls_file.read_text())
 
-    def _create_fake_openclaw_binary(self) -> None:
-        py_file = self.bin_dir / "fake_openclaw.py"
+    def _create_fake_openclaw_binary(self) -> Path:
         script_code = f"""import sys, json
 from pathlib import Path
 
@@ -168,15 +166,9 @@ if len(args) >= 3 and args[0] == "mcp" and args[1] == "unset":
 sys.stderr.write(f"Unknown fake openclaw command: {{args}}\\n")
 sys.exit(1)
 """
-        py_file.write_text(script_code)
-        sh_code = f"""#!/bin/sh
-exec "{sys.executable}" "{py_file}" "$@"
-"""
-        self.fake_openclaw_bin.write_text(sh_code)
-        self.fake_openclaw_bin.chmod(0o755)
+        return make_python_command(self.bin_dir, "openclaw", script_code)
 
-    def _create_fake_launchctl_binary(self) -> None:
-        py_file = self.bin_dir / "fake_launchctl.py"
+    def _create_fake_launchctl_binary(self) -> Path:
         script_code = f"""import sys, json
 from pathlib import Path
 
@@ -191,12 +183,7 @@ calls.append(sys.argv[1:])
 calls_file.write_text(json.dumps(calls))
 sys.exit(0)
 """
-        py_file.write_text(script_code)
-        sh_code = f"""#!/bin/sh
-exec "{sys.executable}" "{py_file}" "$@"
-"""
-        self.fake_launchctl_bin.write_text(sh_code)
-        self.fake_launchctl_bin.chmod(0o755)
+        return make_python_command(self.bin_dir, "launchctl", script_code)
 
     def create_launchagent_plist(self, label: str, program_args: list[str]) -> Path:
         plist_path = self.launchagent_dir / f"{label}.plist"

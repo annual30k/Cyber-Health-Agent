@@ -13,6 +13,7 @@ from cyber_health.hermes_integration import (
     plan_hermes_registration,
     remove_hermes_registration,
 )
+from test_support import make_python_command
 
 
 class HermesIntegrationTests(unittest.TestCase):
@@ -27,8 +28,9 @@ class HermesIntegrationTests(unittest.TestCase):
         self.command.parent.mkdir(parents=True)
         self.command.write_text("#!/bin/sh\nexit 0\n")
         self.command.chmod(0o755)
-        self.hermes = self.root / "hermes"
-        self.hermes.write_text(
+        self.hermes = make_python_command(
+            self.root,
+            "hermes",
             textwrap.dedent(
                 """\
                 #!/usr/bin/env python3
@@ -56,9 +58,8 @@ class HermesIntegrationTests(unittest.TestCase):
                 else:
                     raise SystemExit(2)
                 """
-            )
+            ),
         )
-        self.hermes.chmod(0o755)
 
     def tearDown(self) -> None:
         self.temp.cleanup()

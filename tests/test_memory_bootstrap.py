@@ -9,6 +9,7 @@ import textwrap
 import unittest
 
 from cyber_health.memory_bootstrap import MemoryBootstrapError, MemoryBootstrapper
+from test_support import make_python_command
 
 
 class MemoryBootstrapTests(unittest.TestCase):
@@ -23,8 +24,9 @@ class MemoryBootstrapTests(unittest.TestCase):
         self.plugin_archive.write_bytes(b"fixture archive")
         self.state = self.root / "openclaw-state.json"
         self.state.write_text(json.dumps({"installed": False, "entry": None}), encoding="utf-8")
-        self.openclaw = self.root / "openclaw"
-        self.openclaw.write_text(
+        self.openclaw = make_python_command(
+            self.root,
+            "openclaw",
             textwrap.dedent(
                 f"""\
                 #!/usr/bin/env python3
@@ -61,9 +63,7 @@ class MemoryBootstrapTests(unittest.TestCase):
                     raise SystemExit(2)
                 """
             ),
-            encoding="utf-8",
         )
-        self.openclaw.chmod(0o755)
 
     def tearDown(self) -> None:
         self.temp.cleanup()

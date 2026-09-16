@@ -27,6 +27,7 @@ from cyber_health.install import (
     verify_sqlite_integrity,
 )
 from cyber_health.core_release import CoreRelease
+from test_support import make_python_command
 
 
 class BaseInstallerFixture(unittest.TestCase):
@@ -68,8 +69,7 @@ class BaseInstallerFixture(unittest.TestCase):
             "set_mode": "success",
         })
         self.fake_openclaw_calls.write_text("[]", encoding="utf-8")
-        self.fake_openclaw_bin = self.bin_dir / "openclaw"
-        self._create_fake_openclaw_binary()
+        self.fake_openclaw_bin = self._create_fake_openclaw_binary()
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -77,7 +77,7 @@ class BaseInstallerFixture(unittest.TestCase):
     def set_fake_openclaw_state(self, state: dict) -> None:
         self.fake_openclaw_state.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
-    def _create_fake_openclaw_binary(self) -> None:
+    def _create_fake_openclaw_binary(self) -> Path:
         script = f"""#!/usr/bin/env python3
 import sys
 import json
@@ -127,8 +127,7 @@ elif len(sys.argv) >= 3 and sys.argv[1] == "mcp" and sys.argv[2] == "set":
 
 sys.exit(0)
 """
-        self.fake_openclaw_bin.write_text(script, encoding="utf-8")
-        self.fake_openclaw_bin.chmod(0o755)
+        return make_python_command(self.bin_dir, "openclaw", script)
 
 
 class TestCyberHealthInstaller(BaseInstallerFixture):
