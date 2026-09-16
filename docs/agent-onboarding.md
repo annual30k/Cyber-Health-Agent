@@ -35,6 +35,8 @@ Vault、修改其配置或把健康记录说成已写入长期记忆。安装后
 
 ## 标准流程
 
+首次安装前，用户从 [最新 Cyber Health Release](https://github.com/annual30k/Cyber-Health-Agent/releases/latest) 下载 wheel 和 `SHA256SUMS`、核对 SHA-256，并按 [README 首次安装](../README.md#first-installation-from-github-release) 用 `uvx --from <wheel>` 临时启动 `cyber-health install --dry-run --json`。确认计划后再运行正式 `install`。`uvx` 仅负责启动安装器，不代替安装器执行 Release 校验、宿主登记或长期记忆预检查。Windows 使用 README 的 PowerShell 命令；不要把 macOS 的 `.venv/bin` 路径发给 Windows 用户。
+
 ### 1. 识别宿主，不猜测目标
 
 检查 OpenClaw、Codex 和 Hermes CLI 是否可用，以及固定 MCP 名称 `cyber-health` 是否已经存在。

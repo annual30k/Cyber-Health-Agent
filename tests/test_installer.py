@@ -252,6 +252,7 @@ class TestCyberHealthInstaller(BaseInstallerFixture):
             target_dir=self.target_dir,
             openclaw_bin=str(self.fake_openclaw_bin),
             codex_bin=None,
+            hermes_bin=None,
             dry_run=True,
         )
         report = installer.run()
@@ -497,6 +498,7 @@ class TestCyberHealthInstaller(BaseInstallerFixture):
             target_dir=self.target_dir,
             openclaw_bin=str(self.fake_openclaw_bin),
             codex_bin=None,
+            hermes_bin=None,
             dry_run=False,
         )
 
