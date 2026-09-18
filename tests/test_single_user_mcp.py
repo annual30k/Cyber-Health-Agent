@@ -3,6 +3,7 @@
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from cyber_health import CyberHealthService
@@ -44,7 +45,7 @@ class SingleUserMCPTests(unittest.TestCase):
         today = self.tool(second, "cyber_health_get_today").fn(date="2026-09-18")
         self.assertEqual(today["state_version"], 1)
         self.assertEqual(today["nutrition"]["meal_count"], 1)
-        with sqlite3.connect(self.db) as conn:
+        with closing(sqlite3.connect(self.db)) as conn:
             self.assertEqual(conn.execute("SELECT user_id FROM meal_log").fetchone()[0], SINGLE_USER_ID)
 
     def test_legacy_partition_refused_before_service_start(self) -> None:
@@ -59,7 +60,7 @@ class SingleUserMCPTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(RuntimeError, "migrate"):
             create_mcp_server(self.db)
-        with sqlite3.connect(self.db) as conn:
+        with closing(sqlite3.connect(self.db)) as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM meal_log WHERE user_id='alex'").fetchone()[0], 1)
 
 

@@ -56,7 +56,7 @@ def assert_single_user_database(database_path: Path) -> None:
             if foreign:
                 raise RuntimeError(
                     "Legacy user_id partitions found in the Cyber Health database. "
-                    "Back up and migrate this database to the single-owner schema before starting v0.4.1."
+                    "Back up and migrate this database to the single-owner schema before starting v0.4.2."
                 )
 
 
