@@ -256,7 +256,6 @@ class TestDomainRemaining(unittest.TestCase):
         
         self.assertIsNotNone(log_tool)
         res = log_tool(
-            user_id="u_sanit_user",
             occurred_at="2026-09-04T12:00:00+08:00",
             meal_type="lunch",
             foods=[{"name": "bread", "amount_g": {"low": 300, "high": 100}}],

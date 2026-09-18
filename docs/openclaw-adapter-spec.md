@@ -2,7 +2,7 @@
 
 **状态：** 当前 P0 运行契约
 
-**适用版本：** Cyber Health Core / MCP v0.3.6；OpenClaw 当前 MCP Registry 机制
+**适用版本：** Cyber Health Core / MCP v0.4.0 单人接口；OpenClaw 当前 MCP Registry 机制
 
 **范围：** 单用户、本地优先、一个共享 SQLite 事实库、OpenClaw 作为首个宿主。
 
@@ -25,7 +25,7 @@ Cyber Health Core：事务、规则、修订、审计
 SQLite（唯一实时事实源） + MemoryProvider（可降级的长期记忆）
 ```
 
-P0 不包含云同步、多用户、多宿主同时写入、远程 HTTP 发布或医疗诊断。扩展的 `cyber_health_log_workout` 可将用户主动提交的健康截图与其结构化分析一并写入本地事实库，供后续会话核对。
+P0 不包含云同步、多用户、多宿主同时写入、远程 HTTP 发布或医疗诊断。MCP 工具不接受由模型选择的 `user_id`；同一安装的所有会话使用唯一的内部 `owner` 档案。旧库若含其他 ID，必须先备份并迁移，否则服务拒绝启动。扩展的 `cyber_health_log_workout` 可将用户主动提交的健康截图与其结构化分析一并写入本地事实库，供后续会话核对。
 
 ## 2. 会话与状态恢复
 
@@ -56,13 +56,13 @@ P0 只注册以下工具；工具名称、字段和错误码是跨宿主 Core Co
 
 | 工具 | 类型 | 必填输入 | 成功输出 | 失败 / 限制 |
 | --- | --- | --- | --- | --- |
-| `cyber_health_get_profile` | 读 | `user_id` | `profile`, `state_version` | 不创建健康事实 |
-| `cyber_health_update_profile` | 写 | `user_id`, `idempotency_key` | 更新后的档案与 onboarding 状态 | 不猜测用户未回答的信息 |
-| `cyber_health_get_today` | 读 | `user_id`, `date` | `nutrition`, `plan_status`, `state_version` | 只返回已提交状态 |
-| `cyber_health_log_meal` | 写 | `user_id`, `occurred_at`, `meal_type`, `foods`, `kcal_range`, `idempotency_key` | `operation_id`, `meal_id`, `today_totals`, `state_version` | 区间非法、幂等键冲突、版本冲突 |
-| `cyber_health_get_audit_trail` | 读 | `user_id` | 修订链、版本前后值、因果 ID | 不显示原图或模型推理 |
+| `cyber_health_get_profile` | 读 | 无 | `profile`, `state_version` | 不创建健康事实 |
+| `cyber_health_update_profile` | 写 | `idempotency_key` | 更新后的档案与 onboarding 状态 | 不猜测用户未回答的信息 |
+| `cyber_health_get_today` | 读 | `date` | `nutrition`, `plan_status`, `state_version` | 只返回已提交状态 |
+| `cyber_health_log_meal` | 写 | `occurred_at`, `meal_type`, `foods`, `kcal_range`, `idempotency_key` | `operation_id`, `meal_id`, `today_totals`, `state_version` | 区间非法、幂等键冲突、版本冲突 |
+| `cyber_health_get_audit_trail` | 读 | 无 | 修订链、版本前后值、因果 ID | 不显示原图或模型推理 |
 | `cyber_health_health_check` | 读 | 无 | SQLite、MemoryProvider、待处理工作状态 | 不暴露敏感配置 |
-| `cyber_health_get_schedule` | 读 | `user_id`, `date` | 待提醒事件和补偿事件 | 不直接向用户推送 |
+| `cyber_health_get_schedule` | 读 | `date` | 待提醒事件和补偿事件 | 不直接向用户推送 |
 
 所有写工具采用统一响应外层：
 

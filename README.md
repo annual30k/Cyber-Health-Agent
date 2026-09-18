@@ -1,4 +1,6 @@
-# Cyber Health Agent (Core & stdio MCP v0.3.8)
+# Cyber Health Agent (Core & stdio MCP v0.4.0 source)
+
+> v0.4.0 is a breaking, single-person MCP interface under local verification; it has not been published as a Release. The download examples below continue to describe the last published v0.3.8 wheel. Do not install v0.4.0 over a database containing legacy `user_id` partitions before a verified migration and backup. The MCP server refuses to start against such a database rather than silently hiding facts.
 
 > Independent, pluggable deterministic health engine and stdio MCP server for AI hosts (Codex, OpenClaw, Hermes, etc.). It is not an Obsidian plugin.
 > **Current Status**: Core P0 implementation and extended domain capabilities (27 tools total: 7 P0 + 20 extended), including first-run intake, nightly fact collection, target-gap analysis, host automation declarations, next-day plan generation, cross-session wearable screenshot retention, and read-only active-memory pattern suggestions.
@@ -25,6 +27,7 @@
 ```
 
 - **Host-Neutral & Headless**: AI hosts do not own health state. Health records are stored in SQLite facts tables with optimistic concurrency (`state_version`).
+- **Single-Person MCP Boundary (v0.4.0)**: The 27 MCP tools no longer accept `user_id`; all sessions and hosts on one installation use the internal `owner` identity. Existing databases with other identity partitions require an explicit, verified migration before the new server starts. The Core service retains internal user keys for storage and tests; they are not model-selectable MCP arguments.
 - **Strict Read-Only Purity & Consistent Snapshots**: `cyber_health_get_profile` and `cyber_health_get_today` are strictly pure snapshot queries and never insert or mutate database records. `get_today` uses explicit snapshot read transactions (`BEGIN` ... `COMMIT`).
 - **Idempotency & Concurrency**: All state-mutating operations strictly require a non-empty `idempotency_key`. Replays return cached responses; payload mismatches raise `IDEMPOTENCY_MISMATCH`. Stale writes raise `CONFLICT_VERSION`.
 - **Timezone Awareness & Real DST Calculations**: Meal times and daily records are converted to the user's timezone (`Asia/Shanghai` default) using standard IANA `zoneinfo`. Daily reminders calculate true local offsets dynamically (e.g. America/New_York `-04:00` / `-05:00`).

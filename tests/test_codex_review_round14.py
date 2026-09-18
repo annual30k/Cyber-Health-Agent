@@ -378,7 +378,7 @@ class TestCodexReviewRound14(unittest.TestCase):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
 
-                    user_id = "u_stdio_continuation"
+                    user_id = "owner"
                     date = "2026-09-05"
 
                     # 1. Insert 55 pending outbox records
@@ -394,7 +394,7 @@ class TestCodexReviewRound14(unittest.TestCase):
                             )
 
                     # 2. get_today returns maintenance_recommended = True
-                    today_1 = await session.call_tool("cyber_health_get_today", {"user_id": user_id, "date": date})
+                    today_1 = await session.call_tool("cyber_health_get_today", {"date": date})
                     t1_data = json.loads(today_1.content[0].text)
                     self.assertTrue(t1_data["data"]["maintenance_recommended"])
                     key_pass1 = t1_data["data"]["maintenance_key"]
@@ -402,7 +402,7 @@ class TestCodexReviewRound14(unittest.TestCase):
                     # 3. Maintain Pass 1
                     maint_1 = await session.call_tool(
                         "cyber_health_maintain_memory",
-                        {"user_id": user_id, "idempotency_key": key_pass1},
+                        {"idempotency_key": key_pass1},
                     )
                     m1_data = json.loads(maint_1.content[0].text)
                     self.assertEqual(m1_data["status"], "partial")
@@ -414,7 +414,7 @@ class TestCodexReviewRound14(unittest.TestCase):
                     # 4. Maintain Pass 2 with next_maintenance_key
                     maint_2 = await session.call_tool(
                         "cyber_health_maintain_memory",
-                        {"user_id": user_id, "idempotency_key": key_pass2},
+                        {"idempotency_key": key_pass2},
                     )
                     m2_data = json.loads(maint_2.content[0].text)
                     self.assertEqual(m2_data["status"], "success")
@@ -422,7 +422,7 @@ class TestCodexReviewRound14(unittest.TestCase):
                     self.assertFalse(m2_data["data"]["has_more"])
 
                     # 5. get_today hint is cleared
-                    today_2 = await session.call_tool("cyber_health_get_today", {"user_id": user_id, "date": date})
+                    today_2 = await session.call_tool("cyber_health_get_today", {"date": date})
                     t2_data = json.loads(today_2.content[0].text)
                     self.assertFalse(t2_data["data"]["maintenance_recommended"])
 

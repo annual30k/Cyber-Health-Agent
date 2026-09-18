@@ -9,8 +9,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
 import uuid
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +32,36 @@ from cyber_health.memory import UnavailableMemoryProvider
 from cyber_health.obsidian_memory_provider import ObsidianMemoryProvider
 
 
+SINGLE_USER_ID = "owner"
+
+
+def assert_single_user_database(database_path: Path) -> None:
+    """Refuse legacy identity partitions before the service can mutate a database."""
+    if not database_path.exists():
+        return
+    uri = database_path.resolve().as_uri() + "?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True)) as conn:
+        tables = {
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        for table in (
+            "user_profile", "meal_log", "schedule_event", "operation_log",
+            "domain_record", "memory_outbox",
+        ):
+            if table not in tables:
+                continue
+            foreign = conn.execute(
+                f"SELECT 1 FROM {table} WHERE user_id <> ? LIMIT 1", (SINGLE_USER_ID,)
+            ).fetchone()
+            if foreign:
+                raise RuntimeError(
+                    "Legacy user_id partitions found in the Cyber Health database. "
+                    "Back up and migrate this database to the single-owner schema before starting v0.4.0."
+                )
+
+
 CYBER_HEALTH_HOST_INSTRUCTIONS = (
+    "This is a single-person health assistant. Never supply or infer a user_id. "
     "At the start of every user session, call cyber_health_get_profile before offering health guidance. "
     "When onboarding.complete is false, proactively ask the returned missing questions in small groups "
     "and save the answers with cyber_health_update_profile. Never invent missing body, safety, diet, or "
@@ -138,6 +169,8 @@ def create_mcp_server(
     memory_project_id: str | None = None,
 ) -> FastMCP:
     db_path = Path(database_path) if database_path else get_default_db_path()
+    assert_single_user_database(db_path)
+    user_id = SINGLE_USER_ID
     if memory_provider is None:
         memory_provider = build_memory_provider(
             provider_name=memory_provider_name,
@@ -244,7 +277,7 @@ def create_mcp_server(
             openWorldHint=False,
         )
     )
-    def cyber_health_get_profile(user_id: str) -> dict[str, Any]:
+    def cyber_health_get_profile() -> dict[str, Any]:
         """ALWAYS call this first in a new session to read profile and onboarding state.
 
         If onboarding.complete is false, proactively ask the returned missing questions in
@@ -265,7 +298,6 @@ def create_mcp_server(
         )
     )
     def cyber_health_update_profile(
-        user_id: str,
         idempotency_key: str,
         goals: dict[str, Any] | None = None,
         constraints: dict[str, Any] | None = None,
@@ -307,7 +339,7 @@ def create_mcp_server(
             openWorldHint=False,
         )
     )
-    def cyber_health_get_today(user_id: str, date: str) -> dict[str, Any]:
+    def cyber_health_get_today(date: str) -> dict[str, Any]:
         """Read-only query for committed facts on a specific date (nutrition, plan_status, state_version).
 
         Calculates timezone-aware totals. Also returns daily_review_readiness with the
@@ -327,7 +359,6 @@ def create_mcp_server(
         )
     )
     def cyber_health_log_meal(
-        user_id: str,
         occurred_at: str,
         meal_type: str,
         foods: list[dict[str, Any]],
@@ -379,7 +410,7 @@ def create_mcp_server(
             openWorldHint=False,
         )
     )
-    def cyber_health_get_audit_trail(user_id: str, limit: int = 100) -> dict[str, Any]:
+    def cyber_health_get_audit_trail(limit: int = 100) -> dict[str, Any]:
         """Read-only query for operation log, revision chain, and state version transitions."""
         rows = service.get_audit_trail(user_id=user_id, limit=limit)
         return {
@@ -409,7 +440,6 @@ def create_mcp_server(
         )
     )
     def cyber_health_get_schedule(
-        user_id: str,
         date: str | None = None,
         include_inactive: bool = False,
     ) -> dict[str, Any]:
@@ -442,7 +472,6 @@ def create_mcp_server(
             )
         )
         def cyber_health_log_daily_metrics(
-            user_id: str,
             date: str,
             metrics: dict[str, Any],
             idempotency_key: str,
@@ -469,7 +498,6 @@ def create_mcp_server(
             )
         )
         def cyber_health_delete_meal(
-            user_id: str,
             meal_id: str,
             idempotency_key: str,
             reason: str | None = None,
@@ -496,7 +524,6 @@ def create_mcp_server(
             )
         )
         def cyber_health_log_workout(
-            user_id: str,
             date: str,
             idempotency_key: str,
             session_id: str | None = None,
@@ -547,7 +574,6 @@ def create_mcp_server(
             )
         )
         def cyber_health_daily_review(
-            user_id: str,
             date: str,
             idempotency_key: str,
             user_notes: str | None = None,
@@ -582,7 +608,6 @@ def create_mcp_server(
             )
         )
         def cyber_health_plan_tomorrow(
-            user_id: str,
             date: str,
             idempotency_key: str,
             commit: bool = False,
@@ -612,7 +637,6 @@ def create_mcp_server(
             )
         )
         def cyber_health_acknowledge_schedule_event(
-            user_id: str,
             event_id: str,
             action: str = "acknowledged",
             idempotency_key: str = "",
@@ -637,7 +661,6 @@ def create_mcp_server(
             )
         )
         def cyber_health_maintain_memory(
-            user_id: str,
             idempotency_key: str,
             prune_days: int = 30,
         ) -> dict[str, Any]:
@@ -659,7 +682,7 @@ def create_mcp_server(
                 openWorldHint=False,
             )
         )
-        def cyber_health_get_remaining_calories(user_id: str, date: str) -> dict[str, Any]:
+        def cyber_health_get_remaining_calories(date: str) -> dict[str, Any]:
             """Query remaining daily calorie and protein budget with next-meal recommendation."""
             try:
                 return service.get_remaining_calories(user_id=user_id, date=date)
@@ -675,7 +698,6 @@ def create_mcp_server(
             )
         )
         def cyber_health_get_training_plan(
-            user_id: str,
             date: str,
             equipment: list[str] | None = None,
             target_duration_min: int = 45,
@@ -705,7 +727,6 @@ def create_mcp_server(
             )
         )
         def cyber_health_complete_workout(
-            user_id: str,
             date: str,
             idempotency_key: str,
             completed_exercises: list[dict[str, Any]] | None = None,
@@ -736,7 +757,6 @@ def create_mcp_server(
             )
         )
         def cyber_health_confirm_training_progression(
-            user_id: str,
             exercise_name: str,
             idempotency_key: str,
             confirmed_weight_kg: float | None = None,
@@ -775,7 +795,6 @@ def create_mcp_server(
             )
         )
         def cyber_health_substitute_exercise(
-            user_id: str,
             original_exercise: str,
             equipment: list[str] | None = None,
             discomfort_joint: str | None = None,
@@ -819,7 +838,7 @@ def create_mcp_server(
                 openWorldHint=False,
             )
         )
-        def cyber_health_export_data(user_id: str) -> dict[str, Any]:
+        def cyber_health_export_data() -> dict[str, Any]:
             """Export user health facts, revisions, and operation logs into portable schema snapshot."""
             try:
                 return service.export_data(user_id=user_id)
@@ -835,7 +854,6 @@ def create_mcp_server(
             )
         )
         def cyber_health_import_data(
-            user_id: str,
             data: dict[str, Any],
             idempotency_key: str,
         ) -> dict[str, Any]:
@@ -858,7 +876,6 @@ def create_mcp_server(
             )
         )
         def cyber_health_memory_action(
-            user_id: str,
             idempotency_key: str,
             action_type: str = "action",
             candidate_id: str | None = None,
@@ -899,7 +916,6 @@ def create_mcp_server(
             )
         )
         def cyber_health_schedule_daily_reminders(
-            user_id: str,
             date: str,
             idempotency_key: str,
         ) -> dict[str, Any]:
@@ -926,7 +942,6 @@ def create_mcp_server(
             )
         )
         def cyber_health_update_schedule_event(
-            user_id: str,
             event_id: str,
             idempotency_key: str,
             action: str = "acknowledged",
@@ -957,7 +972,6 @@ def create_mcp_server(
             )
         )
         def cyber_health_query_memory(
-            user_id: str,
             query: str,
             limit: int = 10,
         ) -> dict[str, Any]:
@@ -976,7 +990,6 @@ def create_mcp_server(
             )
         )
         def cyber_health_get_memory_suggestions(
-            user_id: str,
             date: str,
             window_days: int = 30,
             limit: int = 3,

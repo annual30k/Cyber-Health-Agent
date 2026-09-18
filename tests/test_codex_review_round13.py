@@ -320,14 +320,13 @@ class TestCodexReviewRound13(unittest.TestCase):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
 
-                    user_id = "u_stdio_maint"
+                    user_id = "owner"
                     date = "2026-09-05"
 
                     # 1. Log historical meal older than 30 days requiring TTL compaction
                     meal_res = await session.call_tool(
                         "cyber_health_log_meal",
                         {
-                            "user_id": user_id,
                             "occurred_at": "2026-07-20T12:00:00+08:00",
                             "meal_type": "lunch",
                             "foods": [{"name": "沙拉", "amount_g": {"low": 200, "high": 200}}],
@@ -344,7 +343,7 @@ class TestCodexReviewRound13(unittest.TestCase):
                     # 2. Query get_today: observes maintenance hint with generation key
                     today_res = await session.call_tool(
                         "cyber_health_get_today",
-                        {"user_id": user_id, "date": date},
+                        {"date": date},
                     )
                     today_data = json.loads(today_res.content[0].text)
                     self.assertTrue(today_data["data"]["maintenance_recommended"])
@@ -355,7 +354,7 @@ class TestCodexReviewRound13(unittest.TestCase):
                     # 3. Host executes maintain_memory with generation key
                     maint_res = await session.call_tool(
                         "cyber_health_maintain_memory",
-                        {"user_id": user_id, "idempotency_key": maint_key},
+                        {"idempotency_key": maint_key},
                     )
                     maint_data = json.loads(maint_res.content[0].text)
                     self.assertEqual(maint_data["status"], "success")
@@ -363,7 +362,7 @@ class TestCodexReviewRound13(unittest.TestCase):
                     # 4. Query get_today again: hint cleared
                     today_after = await session.call_tool(
                         "cyber_health_get_today",
-                        {"user_id": user_id, "date": date},
+                        {"date": date},
                     )
                     after_data = json.loads(today_after.content[0].text)
                     self.assertFalse(after_data["data"]["maintenance_recommended"])
@@ -388,14 +387,13 @@ class TestCodexReviewRound13(unittest.TestCase):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
 
-                    user_id = "u_stdio_unenabled"
+                    user_id = "owner"
                     date = "2026-09-05"
 
                     # 1. Propose candidate
                     cand_res = await session.call_tool(
                         "cyber_health_memory_action",
                         {
-                            "user_id": user_id,
                             "action_type": "propose",
                             "payload": {"rule": "unenabled_host_test"},
                             "idempotency_key": "stdio-unenabled-cand",
@@ -407,7 +405,7 @@ class TestCodexReviewRound13(unittest.TestCase):
                     # 2. Host calls maintain_memory -> returns partial / MEMORY_DEFERRED safely
                     maint_res = await session.call_tool(
                         "cyber_health_maintain_memory",
-                        {"user_id": user_id, "idempotency_key": "stdio-maint-unenabled"},
+                        {"idempotency_key": "stdio-maint-unenabled"},
                     )
                     maint_data = json.loads(maint_res.content[0].text)
                     self.assertEqual(maint_data["status"], "partial")
@@ -416,7 +414,7 @@ class TestCodexReviewRound13(unittest.TestCase):
                     # 3. Facts queries remain completely unblocked
                     today_res = await session.call_tool(
                         "cyber_health_get_today",
-                        {"user_id": user_id, "date": date},
+                        {"date": date},
                     )
                     today_data = json.loads(today_res.content[0].text)
                     self.assertEqual(today_data["status"], "success")

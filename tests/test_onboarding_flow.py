@@ -49,9 +49,8 @@ class OnboardingFlowTests(unittest.TestCase):
         training = self._tool(server, "cyber_health_get_training_plan")
         tomorrow = self._tool(server, "cyber_health_plan_tomorrow")
 
-        training_result = training(user_id="new-user", date="2026-09-07")
+        training_result = training(date="2026-09-07")
         tomorrow_result = tomorrow(
-            user_id="new-user",
             date="2026-09-08",
             idempotency_key="tomorrow-before-intake",
         )
@@ -72,7 +71,6 @@ class OnboardingFlowTests(unittest.TestCase):
 
         update = self._tool(server, "cyber_health_update_profile")
         result = update(
-            user_id="new-user",
             idempotency_key="first-intake",
             goals={
                 "goal_type": "fat_loss",

@@ -276,13 +276,13 @@ class TestCodexScheduleSync(unittest.TestCase):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
 
-                    user_id = "u_stdio_sync"
+                    user_id = "owner"
                     date = "2026-09-04"
 
                     # 1. Generate daily reminders
                     gen_res = await session.call_tool(
                         "cyber_health_schedule_daily_reminders",
-                        {"user_id": user_id, "date": date, "idempotency_key": "stdio-sched-gen"},
+                        {"date": date, "idempotency_key": "stdio-sched-gen"},
                     )
                     gen_data = json.loads(gen_res.content[0].text)
                     self.assertEqual(gen_data["status"], "success")
@@ -291,7 +291,7 @@ class TestCodexScheduleSync(unittest.TestCase):
                     # 2. Pull schedule
                     pull_res = await session.call_tool(
                         "cyber_health_get_schedule",
-                        {"user_id": user_id, "date": date},
+                        {"date": date},
                     )
                     pull_data = json.loads(pull_res.content[0].text)
                     self.assertEqual(len(pull_data["events"]), 5)
@@ -302,7 +302,6 @@ class TestCodexScheduleSync(unittest.TestCase):
                     postpone_res = await session.call_tool(
                         "cyber_health_update_schedule_event",
                         {
-                            "user_id": user_id,
                             "event_id": lunch_id,
                             "action": "postponed",
                             "new_window_start": "2026-09-04T14:00:00+08:00",
@@ -319,7 +318,6 @@ class TestCodexScheduleSync(unittest.TestCase):
                     cancel_res = await session.call_tool(
                         "cyber_health_update_schedule_event",
                         {
-                            "user_id": user_id,
                             "event_id": wo_id,
                             "action": "cancelled",
                             "idempotency_key": "stdio-cancel-wo",
@@ -332,7 +330,7 @@ class TestCodexScheduleSync(unittest.TestCase):
                     # 5. Default pull excludes cancelled workout
                     pull_active = await session.call_tool(
                         "cyber_health_get_schedule",
-                        {"user_id": user_id, "date": date},
+                        {"date": date},
                     )
                     active_data = json.loads(pull_active.content[0].text)
                     self.assertEqual(len(active_data["events"]), 4)
@@ -340,7 +338,7 @@ class TestCodexScheduleSync(unittest.TestCase):
                     # 6. Snapshot pull with include_inactive=True returns tombstone for timer revocation
                     pull_full = await session.call_tool(
                         "cyber_health_get_schedule",
-                        {"user_id": user_id, "date": date, "include_inactive": True},
+                        {"date": date, "include_inactive": True},
                     )
                     full_data = json.loads(pull_full.content[0].text)
                     self.assertEqual(len(full_data["events"]), 5)

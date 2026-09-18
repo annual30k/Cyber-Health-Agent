@@ -515,7 +515,7 @@ class TestCodexReviewRound10(unittest.TestCase):
     def test_confirm_progression_stdio_mcp_boundary(self) -> None:
         """Verify that cyber_health_confirm_training_progression works over MCP stdio protocol."""
         root = Path(__file__).resolve().parents[1]
-        user_id = "u_stdio_conf"
+        user_id = "owner"
 
         # Seed 2 workouts in DB first
         prop = self._seed_valid_squat_progression(user_id)
@@ -538,7 +538,6 @@ class TestCodexReviewRound10(unittest.TestCase):
             "params": {
                 "name": "cyber_health_confirm_training_progression",
                 "arguments": {
-                    "user_id": user_id,
                     "exercise_name": "Barbell Back Squat",
                     "confirmed_weight_kg": 82.5,
                     "proposal_id": prop["proposal_id"],

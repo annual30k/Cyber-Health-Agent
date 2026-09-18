@@ -68,9 +68,9 @@ class TestMCPStdio(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(tool_names, expected_p0_tools)
 
                 # 2. Call cyber_health_get_profile (read-only purity)
-                prof_call = await session.call_tool("cyber_health_get_profile", {"user_id": "u_stdio_user"})
+                prof_call = await session.call_tool("cyber_health_get_profile", {})
                 prof_data = json.loads(prof_call.content[0].text)
-                self.assertEqual(prof_data["user_id"], "u_stdio_user")
+                self.assertEqual(prof_data["user_id"], "owner")
                 self.assertEqual(prof_data["state_version"], 0)
                 self.assertFalse(prof_data["exists"])
                 self.assertEqual(prof_data["onboarding"]["status"], "required")
@@ -79,7 +79,6 @@ class TestMCPStdio(unittest.IsolatedAsyncioTestCase):
 
                 # 3. Call cyber_health_log_meal
                 meal_payload = {
-                    "user_id": "u_stdio_user",
                     "occurred_at": "2026-09-04T12:30:00+08:00",
                     "meal_type": "lunch",
                     "foods": [{"name": "Salmon and rice", "amount_g": {"low": 200, "high": 250}}],
@@ -97,7 +96,7 @@ class TestMCPStdio(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(log_data["data"]["today_totals"]["kcal_low"], 480)
 
                 # 4. Call cyber_health_get_today
-                today_call = await session.call_tool("cyber_health_get_today", {"user_id": "u_stdio_user", "date": "2026-09-04"})
+                today_call = await session.call_tool("cyber_health_get_today", {"date": "2026-09-04"})
                 today_data = json.loads(today_call.content[0].text)
                 self.assertEqual(today_data["state_version"], 1)
                 self.assertEqual(today_data["nutrition"]["meal_count"], 1)
@@ -125,13 +124,13 @@ class TestMCPStdio(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(hc_data["components"]["sqlite"], "ok")
 
                 # 8. Call cyber_health_get_schedule
-                sched_call = await session.call_tool("cyber_health_get_schedule", {"user_id": "u_stdio_user"})
+                sched_call = await session.call_tool("cyber_health_get_schedule", {})
                 sched_data = json.loads(sched_call.content[0].text)
                 self.assertIn("events", sched_data)
                 self.assertIsInstance(sched_data["events"], list)
 
                 # 9. Call cyber_health_get_audit_trail
-                audit_call = await session.call_tool("cyber_health_get_audit_trail", {"user_id": "u_stdio_user"})
+                audit_call = await session.call_tool("cyber_health_get_audit_trail", {})
                 audit_data = json.loads(audit_call.content[0].text)
                 self.assertIn("operations", audit_data)
                 self.assertEqual(len(audit_data["operations"]), 1)
@@ -224,7 +223,7 @@ class TestMCPStdio(unittest.IsolatedAsyncioTestCase):
                 # 1. get_training_plan
                 tp_res = await session.call_tool(
                     "cyber_health_get_training_plan",
-                    {"user_id": "u_ext_user", "date": "2026-09-04", "target_duration_min": 45},
+                    {"date": "2026-09-04", "target_duration_min": 45},
                 )
                 tp_data = json.loads(tp_res.content[0].text)
                 self.assertEqual(tp_data["status"], "partial")
@@ -235,7 +234,6 @@ class TestMCPStdio(unittest.IsolatedAsyncioTestCase):
                 cw_res = await session.call_tool(
                     "cyber_health_complete_workout",
                     {
-                        "user_id": "u_ext_user",
                         "date": "2026-09-04",
                         "idempotency_key": "cw-key-001",
                         "session_rpe": 7.5,
@@ -257,7 +255,7 @@ class TestMCPStdio(unittest.IsolatedAsyncioTestCase):
                 # 4. export_data
                 exp_res = await session.call_tool(
                     "cyber_health_export_data",
-                    {"user_id": "u_ext_user"},
+                    {},
                 )
                 exp_data = json.loads(exp_res.content[0].text)
                 self.assertEqual(exp_data["status"], "success")
@@ -266,7 +264,7 @@ class TestMCPStdio(unittest.IsolatedAsyncioTestCase):
                 # 5. get_remaining_calories
                 rem_res = await session.call_tool(
                     "cyber_health_get_remaining_calories",
-                    {"user_id": "u_ext_user", "date": "2026-09-04"},
+                    {"date": "2026-09-04"},
                 )
                 rem_data = json.loads(rem_res.content[0].text)
                 self.assertEqual(rem_data["status"], "success")
@@ -275,7 +273,7 @@ class TestMCPStdio(unittest.IsolatedAsyncioTestCase):
                 # 6. schedule_daily_reminders
                 sdr_res = await session.call_tool(
                     "cyber_health_schedule_daily_reminders",
-                    {"user_id": "u_ext_user", "date": "2026-09-04", "idempotency_key": "sdr-key-001"},
+                    {"date": "2026-09-04", "idempotency_key": "sdr-key-001"},
                 )
                 sdr_data = json.loads(sdr_res.content[0].text)
                 self.assertEqual(sdr_data["status"], "success")
@@ -285,7 +283,6 @@ class TestMCPStdio(unittest.IsolatedAsyncioTestCase):
                 mem_res = await session.call_tool(
                     "cyber_health_memory_action",
                     {
-                        "user_id": "u_ext_user",
                         "idempotency_key": "mem-key-001",
                         "action_type": "propose",
                         "payload": {"rule": "High protein breakfast improves satiety"},
@@ -298,7 +295,7 @@ class TestMCPStdio(unittest.IsolatedAsyncioTestCase):
                 # 8. query_memory (dual-layer)
                 qm_res = await session.call_tool(
                     "cyber_health_query_memory",
-                    {"user_id": "u_ext_user", "query": "protein"},
+                    {"query": "protein"},
                 )
                 qm_data = json.loads(qm_res.content[0].text)
                 self.assertEqual(qm_data["status"], "success")
