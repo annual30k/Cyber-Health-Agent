@@ -2,7 +2,7 @@
 
 **状态：** 当前 P0 运行契约
 
-**适用版本：** Cyber Health Core / MCP v0.4.2 单人接口；OpenClaw 当前 MCP Registry 机制
+**适用版本：** Cyber Health Core / MCP v0.4.3 单人接口；OpenClaw 当前 MCP Registry 机制
 
 **范围：** 单用户、本地优先、一个共享 SQLite 事实库、OpenClaw 作为首个宿主。
 
