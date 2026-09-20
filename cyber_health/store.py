@@ -11,6 +11,8 @@ from typing import Iterator
 
 from .errors import StoreBusyError
 
+SINGLE_USER_ID = "owner"
+
 
 class ClosingConnection(sqlite3.Connection):
     """The sqlite context manager commits/rolls back but otherwise leaks handles."""

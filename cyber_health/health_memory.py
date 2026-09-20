@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import subprocess
 from typing import Any
+import yaml
 
 
 HEALTH_MANAGER_AGENT_ID = "health-manager"
@@ -92,7 +93,19 @@ def _project_declared(vault: Path, project_id: str) -> bool:
         text = projects_file.read_text(encoding="utf-8")
     except OSError:
         return False
-    return bool(re.search(rf"(?m)^\s*- id:\s*{re.escape(project_id)}\s*$", text))
+    try:
+        data = yaml.safe_load(text)
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict) and str(item.get("id")) == project_id:
+                    return True
+        elif isinstance(data, dict):
+            for item in data.get("projects", []):
+                if isinstance(item, dict) and str(item.get("id")) == project_id:
+                    return True
+    except yaml.YAMLError:
+        pass
+    return bool(re.search(rf"""(?m)^\s*-\s*id:\s*['"]?{re.escape(project_id)}['"]?\s*(?:#.*)?$""", text))
 
 
 def inspect_health_manager_memory(

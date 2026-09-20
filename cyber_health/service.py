@@ -664,12 +664,23 @@ class CyberHealthService:
     def _today_totals(
         self, conn: Any, user_id: str, day: str, tz_name: str, include_statistical: bool = False
     ) -> dict[str, Any]:
-        rows = conn.execute(
-            """SELECT meal_id, occurred_at, kcal_low, kcal_high, protein_low, protein_high
-               FROM meal_log
-               WHERE user_id = ? AND status = 'active'""",
-            (user_id,),
-        ).fetchall()
+        try:
+            day_dt = datetime.strptime(day, "%Y-%m-%d")
+            w_start = (day_dt - timedelta(days=2)).strftime("%Y-%m-%d")
+            w_end = (day_dt + timedelta(days=2)).strftime("%Y-%m-%d")
+            rows = conn.execute(
+                """SELECT meal_id, occurred_at, kcal_low, kcal_high, protein_low, protein_high
+                   FROM meal_log
+                   WHERE user_id = ? AND occurred_at >= ? AND occurred_at < ? AND status = 'active'""",
+                (user_id, w_start, w_end),
+            ).fetchall()
+        except Exception:
+            rows = conn.execute(
+                """SELECT meal_id, occurred_at, kcal_low, kcal_high, protein_low, protein_high
+                   FROM meal_log
+                   WHERE user_id = ? AND status = 'active'""",
+                (user_id,),
+            ).fetchall()
         matching = [
             r for r in rows
             if self._parse_day_in_timezone(r["occurred_at"], tz_name) == day
@@ -1123,7 +1134,7 @@ class CyberHealthService:
                     "maintenance_key": maint_key,
                     "maintenance": maintenance_data,
                 }
-                return {
+                res = {
                     "operation_id": f"op_read_{uuid.uuid4().hex[:12]}",
                     "status": "success",
                     "data": data,
@@ -1132,8 +1143,11 @@ class CyberHealthService:
                     "state_version": version,
                     **data,
                 }
-            finally:
                 conn.execute("COMMIT")
+                return res
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
 
     def get_remaining_calories(
         self,
@@ -1450,9 +1464,11 @@ class CyberHealthService:
 
                     results.append(item)
 
-                return results
-            finally:
                 conn.execute("COMMIT")
+                return results
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
 
     # =========================================================================
     # Write Operations (Atomic Transactions, Strict Version & Idempotency)
@@ -1515,6 +1531,10 @@ class CyberHealthService:
             "target_meal_id": target_meal_id,
             "expected_state_version": expected_state_version,
             "repeat_meal": repeat_meal,
+            "source": source,
+            "confidence": confidence,
+            "correction_reason": correction_reason,
+            "user_confirmed": user_confirmed,
         }
         now, operation_id = self._now(), f"op_{uuid.uuid4().hex}"
 
@@ -4617,7 +4637,9 @@ class CyberHealthService:
             if facts is None or not isinstance(facts, dict):
                 raise ValidationError("Import data must contain a valid 'facts' dictionary")
 
-            if data.get("user_id") and data["user_id"] != user_id:
+            incoming_user = data.get("user_id")
+            legacy_remap = (user_id == "owner" and (incoming_user in ("u_default", "default") or not incoming_user))
+            if incoming_user and incoming_user != user_id and not legacy_remap:
                 raise ValidationError(f"Import data user_id '{data['user_id']}' does not match target user '{user_id}'")
 
             checksum = data.get("checksum")
@@ -4642,7 +4664,8 @@ class CyberHealthService:
                 if not isinstance(imported_profile, dict):
                     raise ValidationError("facts.profile must be a dictionary")
 
-                if imported_profile.get("user_id") and imported_profile["user_id"] != user_id:
+                p_user = imported_profile.get("user_id")
+                if p_user and p_user != user_id and not (user_id == "owner" and p_user in ("u_default", "default")):
                     raise ValidationError(
                         f"Profile user_id '{imported_profile['user_id']}' does not match target user '{user_id}'"
                     )
@@ -4779,7 +4802,8 @@ class CyberHealthService:
                 mid = m.get("meal_id")
                 if not mid or not isinstance(mid, str):
                     raise ValidationError("Meal records in facts must have a non-empty string meal_id")
-                if m.get("user_id") and m["user_id"] != user_id:
+                m_user = m.get("user_id")
+                if m_user and m_user != user_id and not (user_id == "owner" and m_user in ("u_default", "default")):
                     raise ValidationError(f"Meal record '{mid}' user_id does not match import user '{user_id}'")
 
                 occurred_at = m.get("occurred_at")
@@ -4879,7 +4903,8 @@ class CyberHealthService:
                 rid = d.get("record_id")
                 if not rid or not isinstance(rid, str):
                     raise ValidationError("Domain records in facts must have a non-empty string record_id")
-                if d.get("user_id") and d["user_id"] != user_id:
+                d_user = d.get("user_id")
+                if d_user and d_user != user_id and not (user_id == "owner" and d_user in ("u_default", "default")):
                     raise ValidationError(f"Domain record '{rid}' user_id does not match import user '{user_id}'")
 
                 kind = d.get("kind")
@@ -4957,7 +4982,8 @@ class CyberHealthService:
                 sid = s.get("event_id")
                 if not sid or not isinstance(sid, str):
                     raise ValidationError("Schedule events in facts must have a non-empty string event_id")
-                if s.get("user_id") and s["user_id"] != user_id:
+                s_user = s.get("user_id")
+                if s_user and s_user != user_id and not (user_id == "owner" and s_user in ("u_default", "default")):
                     raise ValidationError(f"Schedule event '{sid}' user_id does not match import user '{user_id}'")
 
                 ev_type = s.get("event_type")
@@ -6043,12 +6069,14 @@ class CyberHealthService:
             )
 
             meal_groups: dict[tuple[str, tuple[str, ...]], dict[str, Any]] = {}
+            q_start = (start_day - timedelta(days=2)).isoformat()
+            q_end = (end_day + timedelta(days=2)).isoformat()
             meal_rows = conn.execute(
                 """SELECT meal_id, occurred_at, meal_type, foods_json
                    FROM meal_log
-                   WHERE user_id = ? AND status = 'active'
+                   WHERE user_id = ? AND occurred_at >= ? AND occurred_at < ? AND status = 'active'
                    ORDER BY occurred_at ASC, meal_id ASC""",
-                (validated.user_id,),
+                (validated.user_id, q_start, q_end),
             ).fetchall()
             for row in meal_rows:
                 try:

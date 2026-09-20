@@ -39,6 +39,7 @@ PURGE_CONFIRMATION_TOKEN = "DELETE_CYBER_HEALTH_DATA"
 FOREIGN_UNSET_CONFIRMATION_TOKEN = "UNSET_FOREIGN_CYBER_HEALTH"
 FIXED_OPENCLAW_SERVER_NAME = "cyber-health"
 DEFAULT_LAUNCHAGENT_LABEL = "ai.cyber-health.agent"
+DEFAULT_INSTALL_DIR_NAME = ".cyber-health"
 
 PROTECTED_NAMES = (
     "obsidian-memory",
@@ -191,10 +192,19 @@ class CyberHealthUninstaller:
         confirm_purge: str | None = None,
     ):
         # Raw paths preserved for symlink checking
-        if project_root is None:
-            self._raw_project_root = Path(__file__).resolve().parents[1]
-        else:
+        if project_root is not None:
             self._raw_project_root = Path(project_root)
+        else:
+            venv_prefix = Path(sys.prefix).resolve()
+            default_target = (Path.home() / DEFAULT_INSTALL_DIR_NAME).resolve()
+            if (venv_prefix.parent / "config" / "installation.json").is_file():
+                self._raw_project_root = venv_prefix.parent
+            elif default_target.is_dir() and (default_target / "config" / "installation.json").is_file():
+                self._raw_project_root = default_target
+            elif default_target.is_dir() and (default_target / "data").is_dir():
+                self._raw_project_root = default_target
+            else:
+                self._raw_project_root = Path(__file__).resolve().parents[1]
 
         if has_symlink_in_path(self._raw_project_root):
             raise SafetyBoundaryError(f"Symlinked project root rejected: {self._raw_project_root}")
@@ -247,7 +257,7 @@ class CyberHealthUninstaller:
         self.dry_run = dry_run
         self.purge_data = purge_data
         self.confirm_purge = confirm_purge
-        self.installed_root = (Path.home() / ".cyber-health").resolve()
+        self.installed_root = (Path.home() / DEFAULT_INSTALL_DIR_NAME).resolve()
 
     def _validate_project_root(self, root: Path) -> None:
         if root in SYSTEM_BROAD_PATHS or root == Path.home():

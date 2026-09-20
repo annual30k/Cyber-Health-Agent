@@ -23,3 +23,7 @@ cyber-health-uninstall = "cyber_health.uninstall:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["cyber_health", "cyber_health_mcp"]
+
+[tool.pytest.ini_options]
+pythonpath = ["tests"]
+

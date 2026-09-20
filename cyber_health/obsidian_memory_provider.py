@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import tempfile
 from typing import Any, Iterable
+import yaml
 
 from .memory import MemoryUnavailable
 
@@ -39,7 +40,19 @@ def _project_is_declared(vault: Path, project_id: str) -> bool:
         text = registry.read_text(encoding="utf-8")
     except OSError:
         return False
-    return bool(re.search(rf"(?m)^\s*- id:\s*{re.escape(project_id)}\s*$", text))
+    try:
+        data = yaml.safe_load(text)
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict) and str(item.get("id")) == project_id:
+                    return True
+        elif isinstance(data, dict):
+            for item in data.get("projects", []):
+                if isinstance(item, dict) and str(item.get("id")) == project_id:
+                    return True
+    except yaml.YAMLError:
+        pass
+    return bool(re.search(rf"""(?m)^\s*-\s*id:\s*['"]?{re.escape(project_id)}['"]?\s*(?:#.*)?$""", text))
 
 
 class ObsidianMemoryProvider:
@@ -84,18 +97,19 @@ class ObsidianMemoryProvider:
 
     @staticmethod
     def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
-        if not text.startswith("---\n"):
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        if not normalized.startswith("---\n"):
             return {}, text
-        end = text.find("\n---", 4)
+        end = normalized.find("\n---", 4)
         if end < 0:
             return {}, text
         fields: dict[str, str] = {}
-        for line in text[4:end].splitlines():
+        for line in normalized[4:end].splitlines():
             if ":" not in line:
                 continue
             key, value = line.split(":", 1)
             fields[key.strip()] = value.strip().strip('"')
-        return fields, text[end + 4 :].lstrip("\n")
+        return fields, normalized[end + 4 :].lstrip("\n")
 
     @staticmethod
     def _yaml_value(value: Any) -> str:

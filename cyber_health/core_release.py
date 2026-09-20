@@ -49,7 +49,11 @@ FetchBytes = Callable[[str], bytes]
 
 
 def _fetch(url: str) -> bytes:
-    request = Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": "cyber-health-agent"})
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "cyber-health-agent"}
+    token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token.strip()}"
+    request = Request(url, headers=headers)
     try:
         with urlopen(request, timeout=20) as response:  # nosec B310: fixed GitHub HTTPS endpoint
             return response.read()

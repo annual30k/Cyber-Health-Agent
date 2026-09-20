@@ -241,6 +241,13 @@ def main(argv: list[str] | None = None) -> int:
     mcp_parser.add_argument("--db", dest="db_path", type=str, default=None)
     mcp_parser.add_argument("--allow-all", dest="allow_all", action="store_true", default=False)
 
+    # migrate-owner
+    migrate_parser = subparsers.add_parser("migrate-owner", help="Migrate legacy user partitions to single-owner schema")
+    migrate_parser.add_argument("--db", type=str, default=None, help="Path to database file")
+    migrate_parser.add_argument("--from-user", type=str, default=None, help="Specific source user_id to migrate")
+    migrate_parser.add_argument("--dry-run", action="store_true", help="Preview migration without modifying data")
+    migrate_parser.add_argument("--json", action="store_true", help="Output result as JSON")
+
     if not argv or argv in (["--help"], ["-h"], ["help"]):
         parser.print_help()
         return 0
@@ -258,6 +265,31 @@ def main(argv: list[str] | None = None) -> int:
         return uninstall_main(argv[1:])
     elif args.command == "status":
         return run_status(args.target_dir, as_json=args.json)
+    elif args.command == "migrate-owner":
+        from .migrate import migrate_database_to_owner, MigrationError
+        target_db = args.db or os.getenv("CYBER_HEALTH_DB") or str(Path.home() / DEFAULT_INSTALL_DIR_NAME / "data" / "cyber-health.sqlite3")
+        try:
+            report = migrate_database_to_owner(
+                target_db,
+                from_user=args.from_user,
+                dry_run=args.dry_run,
+            )
+            if args.json:
+                print(json.dumps(report.to_dict(), indent=2))
+            else:
+                print(f"Status   : {'DRY RUN' if report.dry_run else 'SUCCESS'}")
+                print(f"Database : {report.db_path}")
+                print(f"Message  : {report.message}")
+                if report.backup_path:
+                    print(f"Backup   : {report.backup_path}")
+                print(f"Counts   : {report.migrated_counts}")
+            return 0
+        except MigrationError as err:
+            if args.json:
+                print(json.dumps({"success": False, "error": str(err)}, indent=2))
+            else:
+                print(f"Migration failed: {err}", file=sys.stderr)
+            return 1
     elif args.command == "mcp":
         from cyber_health_mcp.server import main as mcp_main
         try:
