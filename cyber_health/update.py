@@ -211,7 +211,8 @@ class CyberHealthUpdater:
                     parts = line.split("=", 1)
                     if len(parts) == 2:
                         return parts[1].strip().strip('"').strip("'")
-        return "0.2.6"
+        # Release mode has no source tree: the running package is the installed version.
+        return __version__
 
     def prepare_core_release(self) -> CoreReleaseStatus:
         if not self.release_mode:
@@ -726,6 +727,8 @@ class CyberHealthUpdater:
         old_version = str(handoff.get("old_version") or old_meta.get("version", "unknown"))
         backup_status = _dataclass_from_dict(BackupStatus, handoff.get("backup") or {})
         self.core_release_status = _dataclass_from_dict(CoreReleaseStatus, handoff.get("core_release") or {})
+        # The version just installed is the one the previous updater resolved, not this source tree.
+        self.new_version = str(handoff.get("new_version") or self.new_version)
         self.memory_status = self.resolve_memory_status(old_meta)
         try:
             report = self._finish(old_meta, old_version, backup_status, bool(handoff.get("package_updated")))

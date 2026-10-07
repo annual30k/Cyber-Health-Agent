@@ -21,6 +21,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from . import __version__
 from .codex_integration import (
     CodexRegistrationStatus,
     apply_codex_registration,
@@ -427,7 +428,7 @@ class CyberHealthInstaller:
                     parts = line.split("=", 1)
                     if len(parts) == 2:
                         return parts[1].strip().strip('"').strip("'")
-        return "0.2.6"
+        return __version__
 
     def prepare_core_release(self) -> CoreReleaseStatus:
         """Resolve the Core wheel in release mode; local roots remain development-only."""

@@ -496,6 +496,29 @@ class TestUpdateLifecycleImprovements(BaseUpdaterFixture):
         self.assertTrue(report.success)
         self.assertNotEqual(report.command_shim.action, "none")
 
+    def test_finish_upgrade_records_the_handed_off_version(self) -> None:
+        """Regression: the child once wrote its source-tree fallback version ("0.2.6") into metadata."""
+        handoff = self.config_dir / "handoff.json"
+        handoff.write_text(json.dumps({"old_version": "0.2.4", "new_version": "9.9.9", "backup": {"created": True},
+                                       "core_release": {"action": "downloaded", "version": "9.9.9"},
+                                       "package_updated": True}), encoding="utf-8")
+        updater = CyberHealthUpdater(target_dir=self.target_dir, openclaw_bin=None, codex_bin=None, hermes_bin=None,
+                                     dry_run=False)
+        with mock.patch.object(CyberHealthUpdater, "update_memory_plugin", return_value=MemoryPluginReleaseStatus()), \
+                mock.patch.object(CyberHealthUpdater, "verify_schema_and_service", return_value=True), \
+                mock.patch.object(CyberHealthUpdater, "verify_openclaw", return_value=True):
+            report = updater.run_finish(handoff)
+        self.assertTrue(report.success, report.message)
+        self.assertEqual(report.new_version, "9.9.9")
+        meta = json.loads((self.config_dir / "installation.json").read_text(encoding="utf-8"))
+        self.assertEqual(meta["version"], "9.9.9")
+
+    def test_release_mode_version_fallback_is_the_running_package(self) -> None:
+        import cyber_health
+
+        updater = CyberHealthUpdater(target_dir=self.target_dir, openclaw_bin=None, codex_bin=None, hermes_bin=None)
+        self.assertEqual(updater.new_version, cyber_health.__version__)
+
     def test_should_hand_off_only_for_a_real_version_change(self) -> None:
         venv_bin = get_venv_bin_dir(self.venv_dir)
         venv_bin.mkdir(parents=True, exist_ok=True)
