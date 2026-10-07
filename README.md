@@ -306,6 +306,8 @@ installer does not modify another user's plugin configuration or Vault without e
 
 ## Tool Surface & Implementation Status
 
+Hosts load the tool list into every session, so the server publishes a compact listing: generated schema titles and redundant defaults are removed, every tool declares its response envelope as an `outputSchema`, and safety annotations stay explicit. Detailed workflows are available on demand through the `nightly_review` MCP prompt and the read-only `cyber-health://profile` and `cyber-health://today` resources.
+
 ### P0 Core Tools (Default Allowlist - 7 Tools)
 
 | Tool Name | Type | Status | Description |

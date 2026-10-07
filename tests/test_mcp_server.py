@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sqlite3
@@ -11,6 +12,7 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 
+import jsonschema
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
@@ -392,6 +394,91 @@ class ErrorEnvelopeTests(unittest.TestCase):
         self.assertEqual(res["status"], "failed")
         self.assertEqual(res["error"]["code"], "VALIDATION_ERROR")
         self.assertNotIn("input_value=", res["error"]["message"])
+
+
+class CompactToolListingTests(unittest.TestCase):
+    """The compact listing keeps every rule while costing hosts less context."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.server = create_mcp_server(Path(tmp.name) / "compact.sqlite3", allow_all_tools=True)
+        self.tools = {tool.name: tool for tool in asyncio.run(self.server.list_tools())}
+
+    def test_schemas_carry_no_generated_noise_and_declare_outputs(self) -> None:
+        for name, tool in self.tools.items():
+            dumped = json.dumps(tool.inputSchema)
+            self.assertNotIn('"title"', dumped, name)
+            self.assertNotIn('"additionalProperties": true', dumped, name)
+            self.assertFalse(tool.description.startswith((" ", "\n")), name)
+            self.assertIn("properties", tool.outputSchema, name)
+        self.assertIn("state_version", self.tools["cyber_health_log_meal"].outputSchema["properties"])
+        self.assertIn("overall_status", self.tools["cyber_health_health_check"].outputSchema["properties"])
+        self.assertTrue(self.tools["cyber_health_delete_meal"].annotations.destructiveHint)
+
+    def test_compaction_accepts_exactly_the_same_arguments(self) -> None:
+        from cyber_health_mcp.server import _compact_schema
+
+        original = {
+            "type": "object",
+            "title": "Args",
+            "properties": {
+                "title": {"title": "Title", "type": "string"},
+                "note": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None, "title": "Note"},
+                "items": {"anyOf": [{"type": "array", "items": {"type": "integer"}}, {"type": "null"}], "default": None},
+                "extra": {"type": "object", "additionalProperties": True},
+                "closed": {"type": "object", "additionalProperties": False},
+            },
+            "required": ["title"],
+        }
+        compact = _compact_schema(original)
+        self.assertIn("title", compact["properties"])
+        self.assertEqual(compact["properties"]["note"], {"type": ["string", "null"]})
+        self.assertIn("anyOf", compact["properties"]["items"])
+        self.assertEqual(compact["properties"]["closed"]["additionalProperties"], False)
+        samples = [
+            {"title": "a"}, {"title": "a", "note": None}, {"title": "a", "note": "x"}, {"title": 1}, {"note": "x"},
+            {"title": "a", "items": [1]}, {"title": "a", "items": ["x"]}, {"title": "a", "closed": {"k": 1}},
+        ]
+        for sample in samples:
+            self.assertEqual(
+                jsonschema.Draft202012Validator(original).is_valid(sample),
+                jsonschema.Draft202012Validator(compact).is_valid(sample),
+                sample,
+            )
+
+    def test_real_tool_results_validate_against_declared_outputs(self) -> None:
+        calls = {
+            "cyber_health_get_profile": {}, "cyber_health_get_today": {"date": "2026-09-05"},
+            "cyber_health_health_check": {}, "cyber_health_get_schedule": {"date": "2026-09-05"},
+            "cyber_health_get_audit_trail": {}, "cyber_health_query_knowledge": {"query": "protein"},
+            "cyber_health_log_meal": {"occurred_at": "2026-09-05T12:00:00+08:00", "meal_type": "lunch", "foods": [],
+                                      "kcal_low": 1, "kcal_high": 2, "idempotency_key": "compact-1"},
+            "cyber_health_log_meal_failure": None,
+        }
+
+        async def run() -> None:
+            for name, args in calls.items():
+                if args is None:  # a failed write still returns a valid envelope
+                    name, args = "cyber_health_log_meal", {**calls["cyber_health_log_meal"], "kcal_low": 5}
+                _, structured = await self.server.call_tool(name, args)
+                jsonschema.validate(structured, self.tools[name].outputSchema)
+
+        asyncio.run(run())
+
+    def test_nightly_prompt_and_read_only_resources(self) -> None:
+        async def run():
+            prompt = await self.server.get_prompt("nightly_review", {"date": "2026-10-07"})
+            profile = next(iter(await self.server.read_resource("cyber-health://profile")))
+            today = next(iter(await self.server.read_resource("cyber-health://today")))
+            return prompt, profile, today
+
+        prompt, profile, today = asyncio.run(run())
+        text = prompt.messages[0].content.text
+        self.assertIn("2026-10-07", text)
+        self.assertIn("cyber_health_daily_review", text)
+        self.assertIn("onboarding", json.loads(profile.content))
+        self.assertIn("status", json.loads(today.content))
 
 
 if __name__ == "__main__":
