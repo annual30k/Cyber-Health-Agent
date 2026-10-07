@@ -9,41 +9,40 @@ Cyber Health remains an independent Python Core + stdio MCP server.
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+import contextlib
 import hashlib
 import json
 import os
-from pathlib import Path
 import shutil
 import sqlite3
-import stat
 import subprocess
 import sys
-from typing import Any
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
 
-from .uninstall import verify_cyber_health_command_signature
-from .health_memory import HealthManagerMemoryStatus, inspect_health_manager_memory
 from .codex_integration import (
     CodexRegistrationStatus,
     apply_codex_registration,
     find_codex_cli,
     plan_codex_registration,
 )
+from .core_release import CoreReleaseError, CoreReleaseStatus, cache_core_release, resolve_latest_core_release
+from .health_memory import HealthManagerMemoryStatus, inspect_health_manager_memory
 from .hermes_integration import (
     HermesRegistrationStatus,
     apply_hermes_registration,
     find_hermes_cli,
     plan_hermes_registration,
 )
-from .memory_bootstrap import MemoryBootstrapStatus, MemoryBootstrapper
+from .memory_bootstrap import MemoryBootstrapper, MemoryBootstrapStatus
 from .memory_plugin_release import (
     MemoryPluginReleaseError,
     MemoryPluginReleaseStatus,
     cache_memory_plugin_release,
     resolve_latest_memory_plugin_release,
 )
-from .core_release import CoreReleaseError, CoreReleaseStatus, cache_core_release, resolve_latest_core_release
+from .uninstall import verify_cyber_health_command_signature
 
 FIXED_OPENCLAW_SERVER_NAME = "cyber-health"
 DEFAULT_INSTALL_DIR_NAME = ".cyber-health"
@@ -111,7 +110,7 @@ def is_strictly_inside_dir(path: Path, parent_dir: Path) -> bool:
         res_path = path.resolve()
         res_parent = parent_dir.resolve()
         return res_parent in res_path.parents
-    except Exception:
+    except (OSError, RuntimeError):
         return False
 
 
@@ -133,7 +132,7 @@ def is_system_broad_or_drive_root(path: Path) -> bool:
     """Checks whether path represents a root, drive root, or broad system directory."""
     try:
         resolved = path.resolve()
-    except Exception:
+    except (OSError, RuntimeError):
         resolved = path
 
     if resolved in SYSTEM_BROAD_PATHS or resolved == USER_HOME_PATH:
@@ -148,17 +147,15 @@ def is_system_broad_or_drive_root(path: Path) -> bool:
         if resolved.name.lower() == "users" and resolved.parent == Path(resolved.anchor):
             return True
         win_dir = os.environ.get("WINDIR", "C:\\Windows")
-        prog_files = os.environ.get("ProgramFiles", "C:\\Program Files")
-        prog_files_x86 = os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")
+        prog_files = os.environ.get("PROGRAMFILES", "C:\\Program Files")
+        prog_files_x86 = os.environ.get("PROGRAMFILES(X86)", "C:\\Program Files (x86)")
         for broad in (win_dir, prog_files, prog_files_x86):
             if broad and Path(broad).resolve() == resolved:
                 return True
 
     if len(resolved.parts) <= 1:
         return True
-    if len(resolved.parts) <= 2 and not resolved.drive:
-        return True
-    return False
+    return bool(len(resolved.parts) <= 2 and not resolved.drive)
 
 
 def compute_sha256(file_path: Path) -> str:
@@ -182,10 +179,8 @@ def atomic_write_text(file_path: Path, content: str) -> None:
         os.replace(temp_path, file_path)
     finally:
         if temp_path.exists():
-            try:
+            with contextlib.suppress(OSError):
                 temp_path.unlink()
-            except OSError:
-                pass
 
 
 def verify_sqlite_integrity(db_file: Path) -> tuple[bool, str]:
@@ -201,7 +196,7 @@ def verify_sqlite_integrity(db_file: Path) -> tuple[bool, str]:
         if rows and rows[0][0] == "ok":
             return True, "ok"
         return False, f"Integrity check failed: {rows}"
-    except Exception as exc:
+    except (sqlite3.Error, OSError) as exc:
         return False, f"SQLite integrity check exception: {exc}"
     finally:
         if conn is not None:
@@ -220,7 +215,7 @@ def safe_checkpoint_db(db_file: Path) -> tuple[bool, str]:
         if rows and rows[0][0] != 0:
             return False, f"WAL checkpoint busy or incomplete: {rows}"
         return True, "ok"
-    except Exception as exc:
+    except (sqlite3.Error, OSError) as exc:
         return False, f"WAL checkpoint exception: {exc}"
     finally:
         if conn is not None:
@@ -286,12 +281,12 @@ class CyberHealthInstaller:
         project_root: Path | str | None = None,
         target_dir: Path | str | None = None,
         source_db: Path | str | None = None,
-        openclaw_bin: str | None | object = _DEFAULT_BIN,
+        openclaw_bin: str | object | None = _DEFAULT_BIN,
         openclaw_config: Path | str | None = None,
         openclaw_state_dir: Path | str | None = None,
-        codex_bin: str | None | object = _DEFAULT_BIN,
+        codex_bin: str | object | None = _DEFAULT_BIN,
         codex_home: Path | str | None = None,
-        hermes_bin: str | None | object = _DEFAULT_BIN,
+        hermes_bin: str | object | None = _DEFAULT_BIN,
         hermes_home: Path | str | None = None,
         memory_vault: Path | str | None = None,
         memory_project_id: str | None = None,
@@ -422,7 +417,7 @@ class CyberHealthInstaller:
         if pyproject.exists():
             for line in pyproject.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
-                if line.startswith("version =") or line.startswith("version="):
+                if line.startswith(("version =", "version=")):
                     parts = line.split("=", 1)
                     if len(parts) == 2:
                         return parts[1].strip().strip('"').strip("'")
@@ -610,8 +605,9 @@ class CyberHealthInstaller:
                 text=True,
                 timeout=15,
                 shell=False,
+                check=False,
             )
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             status.action = "error"
             status.reason = "Failed to invoke OpenClaw CLI inspection executable"
             return status
@@ -622,7 +618,7 @@ class CyberHealthInstaller:
             status.detected = True
             try:
                 raw_data = json.loads(result.stdout)
-            except Exception:
+            except (TypeError, ValueError):
                 status.action = "error"
                 status.reason = "OpenClaw CLI inspection returned malformed JSON"
                 return status
@@ -777,10 +773,8 @@ class CyberHealthInstaller:
                 raise DataMigrationError(f"Temporary target WAL checkpoint failed: {checkpoint_msg}")
             for sc in (temp_wal, temp_shm):
                 if sc.exists():
-                    try:
+                    with contextlib.suppress(OSError):
                         sc.unlink()
-                    except Exception:
-                        pass
 
             temp_target.replace(target)
             data_plan.target_sha256 = target_sha
@@ -797,20 +791,16 @@ class CyberHealthInstaller:
             )
             for sc in target_sidecars:
                 if sc.exists() and sc.stat().st_size == 0:
-                    try:
+                    with contextlib.suppress(OSError):
                         sc.unlink()
-                    except Exception:
-                        pass
 
             data_plan.executed = True
             data_plan.reason = "Successfully migrated database with matching SHA256 checksum"
         finally:
             for sc in (temp_target, temp_wal, temp_shm):
                 if sc.exists():
-                    try:
+                    with contextlib.suppress(OSError):
                         sc.unlink()
-                    except Exception:
-                        pass
 
     def setup_environment(self) -> None:
         """Initializes virtual environment and installs Cyber Health Agent package."""
@@ -882,7 +872,7 @@ class CyberHealthInstaller:
                 if bin_link.is_symlink() or bin_link.exists():
                     bin_link.unlink()
                 bin_link.symlink_to(target_mcp)
-            except Exception:
+            except OSError:
                 pass
 
     def register_openclaw(self, openclaw_status: OpenClawRegistrationStatus) -> None:
@@ -914,6 +904,7 @@ class CyberHealthInstaller:
             text=True,
             timeout=20,
             shell=False,
+            check=False,
         )
 
         if res.returncode != 0:
@@ -956,7 +947,7 @@ class CyberHealthInstaller:
 
         meta = {
             "version": self.version,
-            "installed_at": datetime.now(timezone.utc).isoformat(),
+            "installed_at": datetime.now(UTC).isoformat(),
             "project_root": str(self.project_root),
             "target_dir": str(self.target_dir),
             "venv_dir": str(self.venv_dir),
@@ -1003,7 +994,7 @@ class CyberHealthInstaller:
                 marker,
                 json.dumps(
                     {
-                        "failed_at": datetime.now(timezone.utc).isoformat(),
+                        "failed_at": datetime.now(UTC).isoformat(),
                         "phase": phase,
                         "error": str(error),
                         "data_action": data_plan.action,
@@ -1023,7 +1014,7 @@ class CyberHealthInstaller:
                 ),
             )
             return marker
-        except Exception:
+        except Exception:  # noqa: BLE001 - a secondary failure while recording the marker must not hide the original error
             # The original installation error is more actionable than a
             # secondary failure while recording the marker.
             return None
@@ -1126,7 +1117,7 @@ class CyberHealthInstaller:
             failure_marker = self.config_dir / "install-failure.json"
             if failure_marker.exists():
                 failure_marker.unlink()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - fail-closed boundary: any failure is reported, never raised past the report
             marker = self.write_installation_failure_marker(
                 phase, exc, data_plan, openclaw_plan, codex_plan, hermes_plan
             )
@@ -1371,7 +1362,7 @@ def main(argv: list[str] | None = None) -> int:
             skip_hermes=args.skip_hermes,
         )
         report = installer.run()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI boundary: any failure is reported as JSON or stderr with exit code 1
         if args.json:
             print(
                 json.dumps(

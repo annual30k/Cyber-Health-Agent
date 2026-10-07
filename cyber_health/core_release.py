@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import tempfile
-from typing import Any, Callable
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
 from urllib.request import Request, urlopen
-
 
 CORE_REPOSITORY = "annual30k/cyber-health-agent"
 CORE_RELEASE_API = f"https://api.github.com/repos/{CORE_REPOSITORY}/releases/latest"

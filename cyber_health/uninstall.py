@@ -9,17 +9,17 @@ and unrelated host state.
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
 import hashlib
 import json
 import os
-from pathlib import Path
 import plistlib
 import shutil
 import stat
 import subprocess
 import sys
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from .codex_integration import (
@@ -102,7 +102,7 @@ def is_strictly_inside_dir(path: Path, parent_dir: Path) -> bool:
         res_path = path.resolve()
         res_parent = parent_dir.resolve()
         return res_parent in res_path.parents
-    except Exception:
+    except (OSError, RuntimeError):
         return False
 
 
@@ -113,13 +113,12 @@ def verify_cyber_health_command_signature(command: str | None, args: list[str] |
     cmd_name = Path(command).name.lower()
     if cmd_name in ("cyber-health-mcp", "cyber-health-mcp.exe", "cyber-health-mcp.cmd"):
         return True
-    if cmd_name.startswith("python"):
-        if args and isinstance(args, list):
-            for i, arg in enumerate(args):
-                if arg == "-m" and i + 1 < len(args) and args[i + 1] == "cyber_health_mcp":
-                    return True
-                if arg == "cyber_health_mcp" and i > 0 and args[i - 1] == "-m":
-                    return True
+    if cmd_name.startswith("python") and args and isinstance(args, list):
+        for i, arg in enumerate(args):
+            if arg == "-m" and i + 1 < len(args) and args[i + 1] == "cyber_health_mcp":
+                return True
+            if arg == "cyber_health_mcp" and i > 0 and args[i - 1] == "-m":
+                return True
     return False
 
 
@@ -176,12 +175,12 @@ class CyberHealthUninstaller:
         self,
         project_root: Path | str | None = None,
         db_path: Path | str | None = None,
-        openclaw_bin: str | None | object = _DEFAULT_BIN,
+        openclaw_bin: str | object | None = _DEFAULT_BIN,
         openclaw_config: Path | str | None = None,
         openclaw_state_dir: Path | str | None = None,
-        codex_bin: str | None | object = _DEFAULT_BIN,
+        codex_bin: str | object | None = _DEFAULT_BIN,
         codex_home: Path | str | None = None,
-        hermes_bin: str | None | object = _DEFAULT_BIN,
+        hermes_bin: str | object | None = _DEFAULT_BIN,
         hermes_home: Path | str | None = None,
         launchagent_dir: Path | str | None = None,
         launchagent_label: str = DEFAULT_LAUNCHAGENT_LABEL,
@@ -199,9 +198,7 @@ class CyberHealthUninstaller:
             default_target = (Path.home() / DEFAULT_INSTALL_DIR_NAME).resolve()
             if (venv_prefix.parent / "config" / "installation.json").is_file():
                 self._raw_project_root = venv_prefix.parent
-            elif default_target.is_dir() and (default_target / "config" / "installation.json").is_file():
-                self._raw_project_root = default_target
-            elif default_target.is_dir() and (default_target / "data").is_dir():
+            elif (default_target.is_dir() and (default_target / "config" / "installation.json").is_file()) or (default_target.is_dir() and (default_target / "data").is_dir()):
                 self._raw_project_root = default_target
             else:
                 self._raw_project_root = Path(__file__).resolve().parents[1]
@@ -300,8 +297,9 @@ class CyberHealthUninstaller:
                 text=True,
                 timeout=15,
                 shell=False,
+                check=False,
             )
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             status.action = "error"
             status.reason = "Failed to invoke OpenClaw CLI inspection executable"
             return status
@@ -471,6 +469,7 @@ class CyberHealthUninstaller:
             text=True,
             timeout=20,
             shell=False,
+            check=False,
         )
 
         if result.returncode == 0:
@@ -558,7 +557,7 @@ class CyberHealthUninstaller:
         try:
             with open(plist_path, "rb") as f:
                 plist_data = plistlib.load(f)
-        except Exception:
+        except (OSError, plistlib.InvalidFileException, ValueError):
             status.action = "error"
             status.reason = "Failed to parse LaunchAgent property list file"
             return status
@@ -595,21 +594,18 @@ class CyberHealthUninstaller:
         cwd = plist.get("WorkingDirectory")
         if cwd:
             raw_cwd = Path(cwd)
-            if not has_symlink_in_path(raw_cwd):
-                if raw_cwd.resolve() == self.project_root:
-                    return True
+            if not has_symlink_in_path(raw_cwd) and raw_cwd.resolve() == self.project_root:
+                return True
 
         if prog:
             raw_prog = Path(prog)
-            if not has_symlink_in_path(raw_prog):
-                if is_strictly_inside_dir(raw_prog, self.project_root):
-                    return True
+            if not has_symlink_in_path(raw_prog) and is_strictly_inside_dir(raw_prog, self.project_root):
+                return True
 
         if args:
             raw_arg0 = Path(args[0])
-            if not has_symlink_in_path(raw_arg0):
-                if is_strictly_inside_dir(raw_arg0, self.project_root):
-                    return True
+            if not has_symlink_in_path(raw_arg0) and is_strictly_inside_dir(raw_arg0, self.project_root):
+                return True
 
         return False
 
@@ -642,12 +638,14 @@ class CyberHealthUninstaller:
                 capture_output=True,
                 text=True,
                 shell=False,
+                check=False,
             )
             subprocess.run(
                 [launchctl, "unload", str(plist_path)],
                 capture_output=True,
                 text=True,
                 shell=False,
+                check=False,
             )
 
         if plist_path.exists():
@@ -659,8 +657,8 @@ class CyberHealthUninstaller:
                 plist_path.unlink()
                 status.executed = True
                 status.reason = f"Successfully unloaded and removed {plist_path.name}"
-            except Exception:
-                raise UninstallerError(f"Failed to remove LaunchAgent file {plist_path.name}")
+            except OSError as exc:
+                raise UninstallerError(f"Failed to remove LaunchAgent file {plist_path.name}") from exc
 
     def collect_approved_data_targets(self) -> list[Path]:
         """Collects strictly approved Cyber Health data targets (never arbitrary files)."""
@@ -682,9 +680,8 @@ class CyberHealthUninstaller:
             for child in sorted(data_dir.iterdir()):
                 if child.is_file() and not child.is_symlink():
                     name = child.name
-                    if (name.startswith("export_") or name.startswith("snapshot_")) and name.endswith(".json"):
-                        if child not in targets:
-                            targets.append(child)
+                    if (name.startswith(("export_", "snapshot_"))) and name.endswith(".json") and child not in targets:
+                        targets.append(child)
 
         return targets
 
@@ -696,7 +693,7 @@ class CyberHealthUninstaller:
         try:
             st = os.lstat(target)
         except OSError as exc:
-            raise PurgeValidationError(f"Target cannot be accessed: {exc}")
+            raise PurgeValidationError(f"Target cannot be accessed: {exc}") from exc
 
         if stat.S_ISLNK(st.st_mode):
             raise PurgeValidationError(f"Symlink rejected for purge: {target}")
@@ -731,7 +728,7 @@ class CyberHealthUninstaller:
     def _trash_or_delete_file(self, path: Path) -> str:
         """Moves file to recoverable trash if practical; never reads or logs contents."""
         user_trash = Path.home() / ".Trash"
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+        ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
         dest_name = f"cyber_health_{path.name}_{ts}"
 
         if (
@@ -743,7 +740,7 @@ class CyberHealthUninstaller:
             try:
                 shutil.move(str(path), str(target_dest))
                 return f"moved to {target_dest}"
-            except Exception:
+            except OSError:
                 pass
 
         # Local project .trash fallback with strict symlink and containment checks
@@ -768,7 +765,7 @@ class CyberHealthUninstaller:
             return f"moved to {target_dest}"
         except PurgeValidationError:
             raise
-        except Exception:
+        except OSError:
             pass
 
         # Final fallback: unlink file only
@@ -822,7 +819,7 @@ class CyberHealthUninstaller:
                     st.st_ctime_ns,
                     str(val.resolve()),
                 )
-            except Exception as exc:
+            except (UninstallerError, OSError, ValueError) as exc:
                 status.errors.append(str(exc))
 
         return status
@@ -1195,7 +1192,7 @@ def main(argv: list[str] | None = None) -> int:
             confirm_purge=args.confirm_purge,
         )
         report = uninstaller.run()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI boundary: any failure is reported as JSON or stderr with exit code 1
         if args.json:
             print(
                 json.dumps(

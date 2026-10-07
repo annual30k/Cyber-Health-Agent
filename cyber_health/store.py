@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
 from .errors import StoreBusyError
 
@@ -153,9 +153,8 @@ class SQLiteStore:
 
         cursor = conn.execute("PRAGMA table_info(schedule_event)")
         sched_cols = {row["name"] for row in cursor.fetchall()}
-        if sched_cols:
-            if "prompt_hint" not in sched_cols:
-                conn.execute("ALTER TABLE schedule_event ADD COLUMN prompt_hint TEXT")
+        if sched_cols and "prompt_hint" not in sched_cols:
+            conn.execute("ALTER TABLE schedule_event ADD COLUMN prompt_hint TEXT")
 
         cursor = conn.execute("PRAGMA table_info(memory_outbox)")
         outbox_cols = {row["name"] for row in cursor.fetchall()}

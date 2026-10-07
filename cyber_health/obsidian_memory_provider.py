@@ -7,17 +7,19 @@ health-manager project, while the core only sees the MemoryProvider protocol.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import contextlib
 import json
 import os
-from pathlib import Path
 import re
 import tempfile
-from typing import Any, Iterable
+from collections.abc import Iterable
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
 import yaml
 
 from .memory import MemoryUnavailable
-
 
 _SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
@@ -132,10 +134,8 @@ class ObsidianMemoryProvider:
                 os.fsync(handle.fileno())
             os.replace(temp_name, path)
         finally:
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 os.unlink(temp_name)
-            except FileNotFoundError:
-                pass
 
     def _iter_notes(self, directory: Path) -> Iterable[Path]:
         if not directory.exists():
@@ -216,7 +216,7 @@ class ObsidianMemoryProvider:
                 "idempotent_replay": True,
             }
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         method = str(payload.get("method") or "memory.propose")
         evidence = payload.get("evidence") or payload.get("content") or payload.get("summary") or payload
         title = str(payload.get("title") or "Cyber Health 长期记忆候选")
@@ -319,8 +319,8 @@ class ObsidianMemoryProvider:
                 "title": title,
                 "type": "health-knowledge",
                 "status": "confirmed_wiki",
-                "created": fields.get("created") or datetime.now(timezone.utc).isoformat(),
-                "last_updated": datetime.now(timezone.utc).isoformat(),
+                "created": fields.get("created") or datetime.now(UTC).isoformat(),
+                "last_updated": datetime.now(UTC).isoformat(),
                 "sensitivity": fields.get("sensitivity") or "internal",
                 "project_id": self.project_id,
                 "sources": f"[[20-Projects/{self.project_id}/raw/raw-{candidate_id}]]",

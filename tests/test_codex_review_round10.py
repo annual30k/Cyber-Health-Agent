@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Any
 
 from cyber_health import (
-    ConflictError,
     CyberHealthService,
     SafetyRestrictedError,
     ValidationError,
@@ -506,7 +505,7 @@ class TestCodexReviewRound10(unittest.TestCase):
 
         # Next training plan should read 60.0kg as baseline
         plan = self.service.get_training_plan(user_id=user_id, date="2026-09-01", equipment=["barbell"])
-        squat_ex = [e for e in plan["plan"]["prescribed_exercises"] if e["name"] == "Barbell Back Squat"][0]
+        squat_ex = next(e for e in plan["plan"]["prescribed_exercises"] if e["name"] == "Barbell Back Squat")
         self.assertEqual(squat_ex["suggested_weight_kg"], 60.0)
 
     # =========================================================================
@@ -558,7 +557,7 @@ class TestCodexReviewRound10(unittest.TestCase):
         )
 
         input_data = json.dumps(init_req) + "\n" + json.dumps(init_notif) + "\n" + json.dumps(call_req) + "\n"
-        stdout, stderr = proc.communicate(input=input_data, timeout=10)
+        stdout, _stderr = proc.communicate(input=input_data, timeout=10)
         self.assertEqual(proc.returncode, 0)
 
         lines = [line.strip() for line in stdout.splitlines() if line.strip()]

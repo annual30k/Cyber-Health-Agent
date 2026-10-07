@@ -8,16 +8,16 @@ It never treats a repository branch as an installable release.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import tempfile
-from typing import Any, Callable
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
 from urllib.request import Request, urlopen
-
 
 MEMORY_PLUGIN_REPOSITORY = "annual30k/obsidian-memory-plugin"
 MEMORY_PLUGIN_RELEASE_API = (
@@ -157,12 +157,16 @@ def cache_memory_plugin_release(
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
     archive_path = cache_dir / release.archive_name
-    if archive_path.exists() and archive_path.is_file() and not archive_path.is_symlink():
-        if _sha256_bytes(archive_path.read_bytes()) == release.sha256:
-            return MemoryPluginReleaseStatus(
-                action="reused", version=release.version, archive_path=str(archive_path),
-                sha256=release.sha256, reason="Reused a SHA-256-verified cached plugin Release.", executed=True,
-            )
+    if (
+        archive_path.exists()
+        and archive_path.is_file()
+        and not archive_path.is_symlink()
+        and _sha256_bytes(archive_path.read_bytes()) == release.sha256
+    ):
+        return MemoryPluginReleaseStatus(
+            action="reused", version=release.version, archive_path=str(archive_path),
+            sha256=release.sha256, reason="Reused a SHA-256-verified cached plugin Release.", executed=True,
+        )
     content = fetch(release.archive_url)
     actual = _sha256_bytes(content)
     if actual != release.sha256:

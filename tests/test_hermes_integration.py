@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import shutil
 import tempfile
 import textwrap
 import unittest
+from pathlib import Path
 
 from cyber_health.hermes_integration import (
     apply_hermes_registration,

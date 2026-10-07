@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 
 from cyber_health.memory_plugin_release import (
     MEMORY_PLUGIN_RELEASE_API,

@@ -37,10 +37,10 @@ class CrossSessionTests(unittest.TestCase):
 
     def test_same_idempotency_key_returns_original_operation(self):
         service = CyberHealthService(self.database)
-        payload = dict(
-            user_id="u_default", occurred_at="2026-09-03T12:30:00+08:00", meal_type="lunch",
-            foods=[], kcal_low=100, kcal_high=150, idempotency_key="lunch-001",
-        )
+        payload = {
+            "user_id": "u_default", "occurred_at": "2026-09-03T12:30:00+08:00", "meal_type": "lunch",
+            "foods": [], "kcal_low": 100, "kcal_high": 150, "idempotency_key": "lunch-001",
+        }
         first = service.log_meal(**payload)
         repeated = service.log_meal(**payload)
 

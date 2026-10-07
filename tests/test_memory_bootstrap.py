@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import tempfile
 import textwrap
 import unittest
+from pathlib import Path
 
 from cyber_health.memory_bootstrap import MemoryBootstrapError, MemoryBootstrapper
 from test_support import make_python_command

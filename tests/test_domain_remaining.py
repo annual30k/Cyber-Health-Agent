@@ -9,15 +9,12 @@
 
 from __future__ import annotations
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Any
 
 from cyber_health import (
     CyberHealthService,
-    ValidationError,
 )
 from cyber_health_mcp.server import create_mcp_server
 

@@ -7,16 +7,12 @@ Obsidian Vaults, or unrelated configurations.
 
 from __future__ import annotations
 
-from dataclasses import asdict
 import json
-import os
-from pathlib import Path
 import plistlib
-import shutil
-import stat
-import sys
 import tempfile
 import unittest
+from dataclasses import asdict
+from pathlib import Path
 from unittest import mock
 
 from cyber_health.uninstall import (
@@ -112,8 +108,8 @@ class BaseFakeHostTest(unittest.TestCase):
         script_code = f"""import sys, json
 from pathlib import Path
 
-state_file = Path({repr(str(self.fake_openclaw_state_file))})
-calls_file = Path({repr(str(self.fake_openclaw_calls_file))})
+state_file = Path({str(self.fake_openclaw_state_file)!r})
+calls_file = Path({str(self.fake_openclaw_calls_file)!r})
 
 calls = []
 if calls_file.exists():
@@ -173,7 +169,7 @@ sys.exit(1)
         script_code = f"""import sys, json
 from pathlib import Path
 
-calls_file = Path({repr(str(self.fake_launchctl_calls_file))})
+calls_file = Path({str(self.fake_launchctl_calls_file)!r})
 calls = []
 if calls_file.exists():
     try:

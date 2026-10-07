@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import tempfile
 import unittest
-import base64
 from pathlib import Path
 
 from cyber_health import CyberHealthService

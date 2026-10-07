@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import shutil
 import subprocess
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import yaml
-
 
 FIXED_HERMES_SERVER_NAME = "cyber-health"
 
@@ -135,7 +134,7 @@ def inspect_hermes_registration(
         return status
     try:
         raw_config = yaml.safe_load(config_file.read_text(encoding="utf-8")) or {}
-    except Exception:
+    except (OSError, ValueError, yaml.YAMLError):
         status.action = "error"
         status.reason = "Hermes config contains invalid YAML"
         return status
@@ -221,8 +220,9 @@ def _probe_hermes(
             text=True,
             timeout=45,
             shell=False,
+            check=False,
         )
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return False, None
     output = f"{result.stdout}\n{result.stderr}"
     match = re.search(r"Tools discovered:\s*(\d+)", output)
@@ -261,6 +261,7 @@ def apply_hermes_registration(
             text=True,
             timeout=60,
             shell=False,
+            check=False,
         )
         if result.returncode != 0:
             raise RuntimeError(
@@ -314,6 +315,7 @@ def remove_hermes_registration(
         text=True,
         timeout=30,
         shell=False,
+        check=False,
     )
     if result.returncode != 0:
         raise RuntimeError(

@@ -11,17 +11,12 @@
 
 from __future__ import annotations
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Any
 
 from cyber_health import (
-    ConflictError,
     CyberHealthService,
-    SafetyRestrictedError,
-    ValidationError,
 )
 
 
@@ -98,7 +93,7 @@ class TestCodexReviewRound9(unittest.TestCase):
         self.assertIn(s2_id, sugg["evidence_source_record_ids"])
 
         # Plan itself must NOT directly mutate the current prescription load until confirmed!
-        squat_ex = [e for e in p2["plan"]["prescribed_exercises"] if e["name"] == "Barbell Back Squat"][0]
+        squat_ex = next(e for e in p2["plan"]["prescribed_exercises"] if e["name"] == "Barbell Back Squat")
         self.assertEqual(squat_ex["suggested_weight_kg"], 80.0)
 
     def test_progression_negative_guards(self) -> None:
@@ -280,7 +275,7 @@ class TestCodexReviewRound9(unittest.TestCase):
         """Verify confirm_training_progression updates state atomically and links parent_id revision chain."""
         user_id = "u_confirm_chain"
         # Seed 2 workouts with 80.0kg (sets: 3, reps: 8)
-        r1 = self.service.complete_workout(
+        self.service.complete_workout(
             user_id=user_id,
             date="2026-09-01",
             idempotency_key="wo-chain-01",
@@ -288,7 +283,7 @@ class TestCodexReviewRound9(unittest.TestCase):
             session_rpe=7.0,
             completion_rate=1.0,
         )
-        r2 = self.service.complete_workout(
+        self.service.complete_workout(
             user_id=user_id,
             date="2026-09-02",
             idempotency_key="wo-chain-02",
@@ -318,11 +313,11 @@ class TestCodexReviewRound9(unittest.TestCase):
 
         # Next plan immediately uses 82.5kg as the baseline load
         plan_after_c1 = self.service.get_training_plan(user_id=user_id, date="2026-09-03", equipment=["barbell"])
-        squat_after_c1 = [e for e in plan_after_c1["plan"]["prescribed_exercises"] if e["name"] == "Barbell Back Squat"][0]
+        squat_after_c1 = next(e for e in plan_after_c1["plan"]["prescribed_exercises"] if e["name"] == "Barbell Back Squat")
         self.assertEqual(squat_after_c1["suggested_weight_kg"], 82.5)
 
         # Complete 2 workouts at 82.5kg to authentically qualify for the next progression
-        r3 = self.service.complete_workout(
+        self.service.complete_workout(
             user_id=user_id,
             date="2026-09-04",
             idempotency_key="wo-chain-03",
@@ -330,7 +325,7 @@ class TestCodexReviewRound9(unittest.TestCase):
             session_rpe=7.0,
             completion_rate=1.0,
         )
-        r4 = self.service.complete_workout(
+        self.service.complete_workout(
             user_id=user_id,
             date="2026-09-05",
             idempotency_key="wo-chain-04",
@@ -358,7 +353,7 @@ class TestCodexReviewRound9(unittest.TestCase):
 
         # Next plan reflects 85.0kg
         plan_after_c2 = self.service.get_training_plan(user_id=user_id, date="2026-09-06", equipment=["barbell"])
-        squat_after_c2 = [e for e in plan_after_c2["plan"]["prescribed_exercises"] if e["name"] == "Barbell Back Squat"][0]
+        squat_after_c2 = next(e for e in plan_after_c2["plan"]["prescribed_exercises"] if e["name"] == "Barbell Back Squat")
         self.assertEqual(squat_after_c2["suggested_weight_kg"], 85.0)
 
     # =========================================================================

@@ -1,9 +1,9 @@
 """Opt-in real host discovery probe; never uses the user's OpenClaw state."""
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+from pathlib import Path
 
 
 def main():

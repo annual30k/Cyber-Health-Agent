@@ -5,9 +5,9 @@ from __future__ import annotations
 import io
 import json
 import os
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from cyber_health.cli import main, run_status

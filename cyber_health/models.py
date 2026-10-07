@@ -6,9 +6,9 @@ valid timezone identifiers, and extra forbidden checks.
 
 from __future__ import annotations
 
-import math
 import base64
 import binascii
+import math
 from datetime import datetime
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
@@ -26,7 +26,7 @@ def _check_real_date(v: str) -> str:
 
 def _check_iso_instant(v: str) -> str:
     try:
-        datetime.fromisoformat(v.replace("Z", "+00:00"))
+        datetime.fromisoformat(v)
     except Exception as err:
         raise ValueError(f"'{v}' is not a valid ISO 8601 timestamp") from err
     return v
@@ -151,12 +151,14 @@ class ProfileGoals(BaseModel):
 
     @model_validator(mode="after")
     def check_ranges(self) -> ProfileGoals:
-        if self.target_kcal_low is not None and self.target_kcal_high is not None:
-            if self.target_kcal_high < self.target_kcal_low:
-                raise ValueError("target_kcal_high cannot be less than target_kcal_low")
-        if self.target_protein_low is not None and self.target_protein_high is not None:
-            if self.target_protein_high < self.target_protein_low:
-                raise ValueError("target_protein_high cannot be less than target_protein_low")
+        if self.target_kcal_low is not None and self.target_kcal_high is not None and self.target_kcal_high < self.target_kcal_low:
+            raise ValueError("target_kcal_high cannot be less than target_kcal_low")
+        if (
+            self.target_protein_low is not None
+            and self.target_protein_high is not None
+            and self.target_protein_high < self.target_protein_low
+        ):
+            raise ValueError("target_protein_high cannot be less than target_protein_low")
         return self
 
 

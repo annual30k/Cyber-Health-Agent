@@ -7,13 +7,13 @@ unrelated Codex configuration.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import hashlib
 import json
 import os
-from pathlib import Path
-import subprocess
 import shutil
+import subprocess
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 FIXED_CODEX_SERVER_NAME = "cyber-health"
@@ -122,7 +122,7 @@ def _is_bound_to_installation(
             if _has_symlink_in_path(raw_db):
                 return False
             resolved_db = raw_db.resolve()
-            return resolved_db == database or resolved_db == target or target in resolved_db.parents
+            return resolved_db in (database, target) or target in resolved_db.parents
     return False
 
 
@@ -148,8 +148,9 @@ def inspect_codex_registration(
             text=True,
             timeout=15,
             shell=False,
+            check=False,
         )
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         status.action = "error"
         status.reason = "Failed to invoke Codex CLI inspection executable"
         return status
@@ -251,6 +252,7 @@ def apply_codex_registration(
         text=True,
         timeout=20,
         shell=False,
+        check=False,
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -290,6 +292,7 @@ def remove_codex_registration(
         text=True,
         timeout=20,
         shell=False,
+        check=False,
     )
     if result.returncode != 0:
         raise RuntimeError(

@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sqlite3
-import sys
 import uuid
 from contextlib import closing
 from pathlib import Path
@@ -20,19 +20,15 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from cyber_health import (
-    ConflictError,
     CyberHealthError,
     CyberHealthService,
-    IdempotencyMismatchError,
-    SafetyRestrictedError,
-    StoreBusyError,
-    ValidationError,
 )
 from cyber_health.memory import UnavailableMemoryProvider
 from cyber_health.obsidian_memory_provider import ObsidianMemoryProvider
 
-
 SINGLE_USER_ID = "owner"
+
+logger = logging.getLogger("cyber_health_mcp")
 
 
 def assert_single_user_database(database_path: Path) -> None:
@@ -124,7 +120,7 @@ def get_default_db_path() -> Path:
                 meta_db = Path(meta["db_path"])
                 if meta_db.exists() or meta_db.parent.exists():
                     return meta_db
-        except Exception:
+        except (OSError, ValueError, TypeError):
             pass
 
     installed_db = installed_root / "data" / "cyber-health.sqlite3"
@@ -161,7 +157,7 @@ def build_memory_provider(
         )
     try:
         return ObsidianMemoryProvider(vault, project)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - provider construction must degrade to an unavailable provider
         return UnavailableMemoryProvider(f"Obsidian Memory provider is unavailable: {exc}")
 
 
@@ -210,12 +206,14 @@ def create_mcp_server(
                 code = "VALIDATION_ERROR"
             else:
                 code = "INTERNAL_ERROR"
+                # Unexpected failures are returned as an envelope; keep the traceback on stderr.
+                logger.error("Unexpected error during %s", action, exc_info=err)
         version = 0
         if user_id:
             try:
                 prof = service.get_profile(user_id)
                 version = prof.get("state_version", 0)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - a failed version lookup must not mask the original error
                 pass
 
         if hasattr(err, "errors") and callable(err.errors):
@@ -229,7 +227,7 @@ def create_mcp_server(
             msg = str(err)
             if "input_value=" in msg:
                 msg = msg.split("input_value=")[0].strip().rstrip(",").strip()
-            message = msg if msg else f"An error occurred during {action} ({code})"
+            message = msg or f"An error occurred during {action} ({code})"
 
         return {
             "operation_id": f"op_err_{uuid.uuid4().hex[:8]}",
@@ -291,7 +289,7 @@ def create_mcp_server(
         """
         try:
             return service.get_profile(user_id=user_id)
-        except Exception as err:
+        except Exception as err:  # noqa: BLE001 - MCP tool boundary: every failure becomes an error envelope
             return _err_envelope(err, "get_profile", user_id)
 
     @mcp.tool(
@@ -352,7 +350,7 @@ def create_mcp_server(
         """
         try:
             return service.get_today(user_id=user_id, day=date)
-        except Exception as err:
+        except Exception as err:  # noqa: BLE001 - MCP tool boundary: every failure becomes an error envelope
             return _err_envelope(err, "get_today", user_id)
 
     @mcp.tool(
@@ -691,7 +689,7 @@ def create_mcp_server(
             """Query remaining daily calorie and protein budget with next-meal recommendation."""
             try:
                 return service.get_remaining_calories(user_id=user_id, date=date)
-            except Exception as err:
+            except Exception as err:  # noqa: BLE001 - MCP tool boundary: every failure becomes an error envelope
                 return _err_envelope(err, "get_remaining_calories", user_id)
 
         @mcp.tool(
@@ -720,7 +718,7 @@ def create_mcp_server(
                     target_duration_min=target_duration_min,
                     evidence_window_days=evidence_window_days,
                 )
-            except Exception as err:
+            except Exception as err:  # noqa: BLE001 - MCP tool boundary: every failure becomes an error envelope
                 return _err_envelope(err, "get_training_plan", user_id)
 
         @mcp.tool(
@@ -814,7 +812,7 @@ def create_mcp_server(
                     discomfort_joint=discomfort_joint,
                     reason=reason,
                 )
-            except Exception as err:
+            except Exception as err:  # noqa: BLE001 - MCP tool boundary: every failure becomes an error envelope
                 return _err_envelope(err, "substitute_exercise", user_id)
 
         @mcp.tool(
@@ -832,7 +830,7 @@ def create_mcp_server(
             """Lookup verified peer-reviewed sports nutrition and cardiovascular exercise safety guidelines."""
             try:
                 return service.query_knowledge(query=query, category=category)
-            except Exception as err:
+            except Exception as err:  # noqa: BLE001 - MCP tool boundary: every failure becomes an error envelope
                 return _err_envelope(err, "query_knowledge")
 
         @mcp.tool(
@@ -847,7 +845,7 @@ def create_mcp_server(
             """Export user health facts, revisions, and operation logs into portable schema snapshot."""
             try:
                 return service.export_data(user_id=user_id)
-            except Exception as err:
+            except Exception as err:  # noqa: BLE001 - MCP tool boundary: every failure becomes an error envelope
                 return _err_envelope(err, "export_data", user_id)
 
         @mcp.tool(
@@ -983,7 +981,7 @@ def create_mcp_server(
             """Dual-layer memory query retrieving short-term SQLite facts and long-term Obsidian memories."""
             try:
                 return service.query_memory(user_id=user_id, query=query, limit=limit)
-            except Exception as err:
+            except Exception as err:  # noqa: BLE001 - MCP tool boundary: every failure becomes an error envelope
                 return _err_envelope(err, "query_memory", user_id)
 
         @mcp.tool(
@@ -1007,7 +1005,7 @@ def create_mcp_server(
                     window_days=window_days,
                     limit=limit,
                 )
-            except Exception as err:
+            except Exception as err:  # noqa: BLE001 - MCP tool boundary: every failure becomes an error envelope
                 return _err_envelope(err, "get_memory_suggestions", user_id)
 
     return mcp

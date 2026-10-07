@@ -9,25 +9,31 @@ and refreshes supported host MCP registrations.
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
-import hashlib
+import contextlib
 import json
 import os
-from pathlib import Path
 import shutil
-import sqlite3
 import subprocess
 import sys
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
+from .codex_integration import apply_codex_registration, find_codex_cli, plan_codex_registration
+from .core_release import CoreReleaseError, CoreReleaseStatus, cache_core_release, resolve_latest_core_release
+from .health_memory import HealthManagerMemoryStatus, inspect_health_manager_memory
+from .hermes_integration import (
+    apply_hermes_registration,
+    find_hermes_cli,
+    plan_hermes_registration,
+)
 from .install import (
-    FIXED_OPENCLAW_SERVER_NAME,
     DEFAULT_INSTALL_DIR_NAME,
+    FIXED_OPENCLAW_SERVER_NAME,
     PROTECTED_NAMES,
-    SYSTEM_BROAD_PATHS,
-    compute_sha256,
     atomic_write_text,
+    compute_sha256,
     get_executable_name,
     get_venv_bin_dir,
     has_symlink_in_path,
@@ -35,23 +41,15 @@ from .install import (
     safe_checkpoint_db,
     verify_sqlite_integrity,
 )
-from .service import CyberHealthService
-from .uninstall import verify_cyber_health_command_signature
-from .health_memory import HealthManagerMemoryStatus, inspect_health_manager_memory
-from .obsidian_memory_provider import ObsidianMemoryProvider
-from .codex_integration import apply_codex_registration, find_codex_cli, plan_codex_registration
-from .hermes_integration import (
-    apply_hermes_registration,
-    find_hermes_cli,
-    plan_hermes_registration,
-)
 from .memory_plugin_release import (
     MemoryPluginReleaseError,
     MemoryPluginReleaseStatus,
     cache_memory_plugin_release,
     resolve_latest_memory_plugin_release,
 )
-from .core_release import CoreReleaseError, CoreReleaseStatus, cache_core_release, resolve_latest_core_release
+from .obsidian_memory_provider import ObsidianMemoryProvider
+from .service import CyberHealthService
+from .uninstall import verify_cyber_health_command_signature
 
 _DEFAULT_BIN = object()
 
@@ -106,12 +104,12 @@ class CyberHealthUpdater:
         self,
         project_root: Path | str | None = None,
         target_dir: Path | str | None = None,
-        openclaw_bin: str | None | object = _DEFAULT_BIN,
+        openclaw_bin: str | object | None = _DEFAULT_BIN,
         openclaw_config: Path | str | None = None,
         openclaw_state_dir: Path | str | None = None,
-        codex_bin: str | None | object = _DEFAULT_BIN,
+        codex_bin: str | object | None = _DEFAULT_BIN,
         codex_home: Path | str | None = None,
-        hermes_bin: str | None | object = _DEFAULT_BIN,
+        hermes_bin: str | object | None = _DEFAULT_BIN,
         hermes_home: Path | str | None = None,
         dry_run: bool = False,
         use_uv: bool = True,
@@ -191,7 +189,7 @@ class CyberHealthUpdater:
         if pyproject.exists():
             for line in pyproject.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
-                if line.startswith("version =") or line.startswith("version="):
+                if line.startswith(("version =", "version=")):
                     parts = line.split("=", 1)
                     if len(parts) == 2:
                         return parts[1].strip().strip('"').strip("'")
@@ -224,7 +222,7 @@ class CyberHealthUpdater:
         if meta_file.exists():
             try:
                 return json.loads(meta_file.read_text(encoding="utf-8"))
-            except Exception:
+            except (OSError, ValueError):
                 pass
 
         return {
@@ -251,7 +249,7 @@ class CyberHealthUpdater:
             return HealthManagerMemoryStatus(reason="Recorded long-term memory binding is incomplete.")
         try:
             provider = ObsidianMemoryProvider(vault_path, project_id)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - provider construction must degrade to an invalid memory status
             return HealthManagerMemoryStatus(
                 state="invalid",
                 vault_path=vault_path,
@@ -295,7 +293,7 @@ class CyberHealthUpdater:
             raise UpdateBackupError(f"Active database failed integrity check before backup: {msg}")
 
         source_sha = compute_sha256(self.target_db_path)
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         backup_file = self.backups_dir / f"cyber-health-backup-{ts}.sqlite3"
         backup_wal = backup_file.parent / (backup_file.name + "-wal")
         backup_shm = backup_file.parent / (backup_file.name + "-shm")
@@ -314,20 +312,16 @@ class CyberHealthUpdater:
         if backup_sha != source_sha:
             for f in (backup_file, backup_wal, backup_shm):
                 if f.exists():
-                    try:
+                    with contextlib.suppress(OSError):
                         f.unlink()
-                    except Exception:
-                        pass
             raise UpdateBackupError(f"Backup checksum mismatch! Source: {source_sha}, Backup: {backup_sha}")
 
         ok, msg = verify_sqlite_integrity(backup_file)
         if not ok:
             for f in (backup_file, backup_wal, backup_shm):
                 if f.exists():
-                    try:
+                    with contextlib.suppress(OSError):
                         f.unlink()
-                    except Exception:
-                        pass
             raise UpdateBackupError(f"Backup failed SQLite integrity check: {msg}")
 
         # Clean up any sidecars created during the integrity check
@@ -335,17 +329,13 @@ class CyberHealthUpdater:
         if not checkpoint_ok:
             for f in (backup_file, backup_wal, backup_shm):
                 if f.exists():
-                    try:
+                    with contextlib.suppress(OSError):
                         f.unlink()
-                    except Exception:
-                        pass
             raise UpdateBackupError(f"Backup WAL checkpoint failed: {checkpoint_msg}")
         for sc in (backup_wal, backup_shm):
             if sc.exists():
-                try:
+                with contextlib.suppress(OSError):
                     sc.unlink()
-                except Exception:
-                    pass
 
         status.created = True
         status.sha256 = backup_sha
@@ -403,7 +393,7 @@ class CyberHealthUpdater:
                 raise UpdaterError("Configured health-manager Obsidian Memory provider did not respond to ping")
             return True
         except Exception as exc:
-            raise UpdaterError(f"Post-update schema verification failed: {exc}")
+            raise UpdaterError(f"Post-update schema verification failed: {exc}") from exc
 
     def verify_openclaw(self) -> bool:
         """Verifies OpenClaw MCP registration for cyber-health with strict fail-closed semantics."""
@@ -422,8 +412,9 @@ class CyberHealthUpdater:
                 text=True,
                 timeout=15,
                 shell=False,
+                check=False,
             )
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             return False
 
         target_mcp = get_venv_bin_dir(self.venv_dir) / get_executable_name("cyber-health-mcp")
@@ -441,7 +432,7 @@ class CyberHealthUpdater:
         if res.returncode == 0:
             try:
                 raw_data = json.loads(res.stdout)
-            except Exception:
+            except (TypeError, ValueError):
                 # Malformed JSON in stdout: fail closed, do NOT overwrite
                 return False
 
@@ -477,9 +468,10 @@ class CyberHealthUpdater:
                     text=True,
                     timeout=20,
                     shell=False,
+                    check=False,
                 )
                 return set_res.returncode == 0
-            except Exception:
+            except (OSError, subprocess.SubprocessError):
                 return False
 
         # Non-zero returncode: inspect combined output
@@ -504,9 +496,10 @@ class CyberHealthUpdater:
                 text=True,
                 timeout=20,
                 shell=False,
+                check=False,
             )
             return set_res.returncode == 0
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             return False
 
     def verify_codex(self) -> bool:
@@ -532,7 +525,7 @@ class CyberHealthUpdater:
                 dry_run=self.dry_run,
             )
             return True
-        except Exception:
+        except Exception:  # noqa: BLE001 - registration failure counts as unverified (fail-closed)
             return False
 
     def verify_hermes(self) -> bool:
@@ -559,7 +552,7 @@ class CyberHealthUpdater:
                 dry_run=self.dry_run,
             )
             return True
-        except Exception:
+        except Exception:  # noqa: BLE001 - registration failure counts as unverified (fail-closed)
             return False
 
     def update_memory_plugin(self, metadata: dict[str, Any]) -> MemoryPluginReleaseStatus:
@@ -584,6 +577,7 @@ class CyberHealthUpdater:
             result = subprocess.run(
                 [self.openclaw_bin, "plugins", "install", status.archive_path, "--force", "--accept-capabilities", "--acknowledge-install-policy-warning"],
                 env=self.get_openclaw_env(), capture_output=True, text=True, timeout=45, shell=False,
+                check=False,
             )
             if result.returncode != 0:
                 raise UpdaterError(f"OpenClaw could not update obsidian-memory-plugin: {result.stderr.strip()}")
@@ -598,7 +592,7 @@ class CyberHealthUpdater:
             return
 
         old_meta["version"] = self.new_version
-        old_meta["updated_at"] = datetime.now(timezone.utc).isoformat()
+        old_meta["updated_at"] = datetime.now(UTC).isoformat()
         if backup_status.backup_file:
             old_meta["last_backup"] = backup_status.backup_file
         old_meta["memory"] = self.memory_status.to_dict()
@@ -762,7 +756,7 @@ class CyberHealthUpdater:
                 hermes_verified=True,
                 message="Update completed successfully",
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - fail-closed boundary: any failure is reported, never raised past the report
             return UpdateReport(
                 dry_run=self.dry_run,
                 success=False,
@@ -903,7 +897,7 @@ def main(argv: list[str] | None = None) -> int:
             use_uv=not args.no_uv,
         )
         report = updater.run()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI boundary: any failure is reported as JSON or stderr with exit code 1
         if args.json:
             print(
                 json.dumps(

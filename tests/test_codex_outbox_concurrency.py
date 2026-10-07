@@ -1,4 +1,5 @@
 """Deterministic interleaving probes for outbox durability."""
+import contextlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -34,11 +35,9 @@ class OutboxInterleavingTests(unittest.TestCase):
                         errors.append(getattr(error, "code", type(error).__name__))
                 return {"status": "success"}
         service.memory_provider = Provider()
-        try:
+        with contextlib.suppress(Exception):
             service.propose_memory_candidate(user_id="u", method="memory.propose",
                 payload={"text": "original"}, idempotency_key="same")
-        except Exception:
-            pass
         self.assertEqual(calls.__len__(), 1)
         self.assertEqual(errors, ["IDEMPOTENCY_MISMATCH"])
 

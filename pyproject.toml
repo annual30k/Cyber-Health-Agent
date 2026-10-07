@@ -27,3 +27,22 @@ packages = ["cyber_health", "cyber_health_mcp"]
 [tool.pytest.ini_options]
 pythonpath = ["tests"]
 
+
+[tool.ruff]
+target-version = "py311"
+line-length = 140
+
+[tool.ruff.lint]
+# Pinned explicitly so CI results do not drift with ruff's default rule set.
+select = ["E4", "E7", "E9", "F", "I", "B", "UP", "BLE", "S110", "S112", "PLW1510", "SIM", "C4", "RUF", "PIE", "FURB"]
+ignore = [
+    "RUF001", "RUF002", "RUF003",  # Chinese full-width punctuation in user-facing strings is intentional
+    "SIM108",                      # ternaries are not always clearer
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Test fixtures deliberately swallow errors and run fake CLIs without check=True.
+"tests/**" = ["BLE001", "S110", "S112", "PLW1510", "SIM117", "B017"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["cyber_health", "cyber_health_mcp", "test_support"]

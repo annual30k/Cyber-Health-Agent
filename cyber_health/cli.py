@@ -13,23 +13,23 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
 
+from .codex_integration import find_codex_cli, inspect_codex_registration
+from .health_memory import HealthManagerMemoryStatus, inspect_health_manager_memory
+from .hermes_integration import find_hermes_cli, inspect_hermes_registration
 from .install import (
-    FIXED_OPENCLAW_SERVER_NAME,
     DEFAULT_INSTALL_DIR_NAME,
+    FIXED_OPENCLAW_SERVER_NAME,
     get_executable_name,
     get_venv_bin_dir,
     verify_sqlite_integrity,
 )
 from .uninstall import verify_cyber_health_command_signature
-from .health_memory import HealthManagerMemoryStatus, inspect_health_manager_memory
-from .codex_integration import find_codex_cli, inspect_codex_registration
-from .hermes_integration import find_hermes_cli, inspect_hermes_registration
 
 
 def run_status(target_dir_str: str | None, as_json: bool = False) -> int:
@@ -68,7 +68,7 @@ def run_status(target_dir_str: str | None, as_json: bool = False) -> int:
             meta = json.loads(config_file.read_text(encoding="utf-8"))
             status_data["version"] = meta.get("version", "unknown")
             status_data["installed_at"] = meta.get("installed_at")
-        except Exception:
+        except (OSError, ValueError, AttributeError):
             status_data["version"] = "error reading metadata"
 
     if db_file.exists():
@@ -109,12 +109,12 @@ def run_status(target_dir_str: str | None, as_json: bool = False) -> int:
                             "ownership_verified": False,
                             "reason": "Registration exists but is not a recognized Cyber Health command",
                         }
-                except Exception:
+                except (ValueError, TypeError):
                     status_data["openclaw_details"] = {
                         "ownership_verified": False,
                         "reason": "OpenClaw returned malformed JSON",
                     }
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             pass
 
     codex_bin = find_codex_cli()
@@ -252,7 +252,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 0
 
-    args, unknown = parser.parse_known_args(argv)
+    args, _unknown = parser.parse_known_args(argv)
 
     if args.command == "install":
         from .install import main as install_main
@@ -266,7 +266,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "status":
         return run_status(args.target_dir, as_json=args.json)
     elif args.command == "migrate-owner":
-        from .migrate import migrate_database_to_owner, MigrationError
+        from .migrate import MigrationError, migrate_database_to_owner
         target_db = args.db or os.getenv("CYBER_HEALTH_DB") or str(Path.home() / DEFAULT_INSTALL_DIR_NAME / "data" / "cyber-health.sqlite3")
         try:
             report = migrate_database_to_owner(

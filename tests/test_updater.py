@@ -7,23 +7,20 @@ and update workflow in isolated test fixtures.
 from __future__ import annotations
 
 import json
-import os
-from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
+from cyber_health.core_release import CoreRelease
 from cyber_health.install import compute_sha256, get_executable_name, get_venv_bin_dir, verify_sqlite_integrity
+from cyber_health.memory_plugin_release import MemoryPluginRelease
 from cyber_health.update import (
     CyberHealthUpdater,
     UpdateBackupError,
-    UpdaterError,
-    format_text_report,
     main,
 )
-from cyber_health.memory_plugin_release import MemoryPluginRelease
-from cyber_health.core_release import CoreRelease
 from test_support import isolate_host_clis
 
 
@@ -125,7 +122,7 @@ class TestCyberHealthUpdater(BaseUpdaterFixture):
         self.assertEqual(status.sha256, compute_sha256(self.target_db))
 
         # Check backup file SQLite integrity
-        ok, msg = verify_sqlite_integrity(Path(status.backup_file))
+        ok, _msg = verify_sqlite_integrity(Path(status.backup_file))
         self.assertTrue(ok)
 
     def test_create_database_snapshot_dry_run(self) -> None:
@@ -273,7 +270,7 @@ class TestCyberHealthUpdater(BaseUpdaterFixture):
         self.assertFalse((backup_p.parent / (backup_p.name + "-shm")).exists())
 
         # Integrity check on backup file passes
-        ok, msg = verify_sqlite_integrity(backup_p)
+        ok, _msg = verify_sqlite_integrity(backup_p)
         self.assertTrue(ok)
 
     def test_verify_openclaw_permission_denied_fails_closed(self) -> None:

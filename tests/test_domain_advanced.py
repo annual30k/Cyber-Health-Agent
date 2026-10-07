@@ -12,7 +12,6 @@ Verifies:
 
 from __future__ import annotations
 
-import json
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -21,10 +20,7 @@ from typing import Any
 
 from cyber_health import (
     CyberHealthService,
-    MemoryProvider,
-    MemoryUnavailable,
     SafetyRestrictedError,
-    UnavailableMemoryProvider,
     ValidationError,
 )
 
@@ -95,7 +91,7 @@ class TestDomainAdvanced(unittest.TestCase):
         self.assertEqual(today_after_del["nutrition"]["kcal_low"], 150)
 
         # 4. Repeat breakfast on next day using repeat_meal="yesterday"
-        bk_repeat = self.service.log_meal(
+        self.service.log_meal(
             user_id="u_user1",
             occurred_at="2026-09-05T08:00:00+08:00",
             meal_type="breakfast",

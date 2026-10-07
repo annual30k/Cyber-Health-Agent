@@ -6,15 +6,15 @@ the Vault contents; the configured provider owns that boundary.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
-import yaml
 
+import yaml
 
 HEALTH_MANAGER_AGENT_ID = "health-manager"
 OBSIDIAN_MEMORY_PLUGIN_ID = "obsidian-memory-plugin"
@@ -55,13 +55,13 @@ def _run_json(openclaw_bin: str, args: list[str], env: dict[str, str]) -> tuple[
             shell=False,
             check=False,
         )
-    except Exception as exc:
+    except (OSError, subprocess.SubprocessError) as exc:
         return None, f"OpenClaw command failed: {exc}"
     if result.returncode != 0:
         return None, (result.stderr or result.stdout or f"exit code {result.returncode}").strip()
     try:
         value = json.loads(result.stdout)
-    except Exception as exc:
+    except (TypeError, ValueError) as exc:
         return None, f"OpenClaw returned invalid JSON: {exc}"
     if not isinstance(value, dict):
         return None, "OpenClaw returned a non-object JSON value"

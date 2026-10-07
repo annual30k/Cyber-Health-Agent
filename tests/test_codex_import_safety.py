@@ -1,9 +1,11 @@
 """Migration must not silently undo newer safety facts or ignore collisions."""
+import contextlib
 import copy
 import tempfile
 import unittest
 from pathlib import Path
-from cyber_health import CyberHealthService, ConflictError
+
+from cyber_health import ConflictError, CyberHealthService
 
 
 class ImportSafetyTests(unittest.TestCase):
@@ -17,10 +19,8 @@ class ImportSafetyTests(unittest.TestCase):
         backup = self.s.export_data(user_id="u")["data"]
         self.s.log_daily_metrics(user_id="u", date="2026-09-04",
             metrics={"notes": "严重胸痛"}, idempotency_key="symptoms")
-        try:
+        with contextlib.suppress(ConflictError):
             self.s.import_data(user_id="u", data=backup, idempotency_key="restore")
-        except ConflictError:
-            pass
         self.assertEqual(self.s.get_profile("u")["safety_mode"], "restricted")
 
     def test_duplicate_meal_different_protein_is_conflict(self):

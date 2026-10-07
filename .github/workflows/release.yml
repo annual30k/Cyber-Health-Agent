@@ -25,6 +25,7 @@ jobs:
         run: |
           package_version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
           test "v${package_version}" = "${GITHUB_REF_NAME}"
+      - run: uvx ruff@0.16.10 check .
       - run: uv run python -m unittest discover -s tests -p 'test_*.py'
 
   publish:

@@ -6,27 +6,23 @@ dry-run behavior, and safety boundary enforcement.
 
 from __future__ import annotations
 
-from dataclasses import asdict
 import json
 import os
-from pathlib import Path
-import shutil
 import sqlite3
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
+from cyber_health.core_release import CoreRelease
 from cyber_health.install import (
-    FIXED_OPENCLAW_SERVER_NAME,
     CyberHealthInstaller,
     DataMigrationError,
     SafetyBoundaryError,
     compute_sha256,
-    format_text_report,
     main,
     verify_sqlite_integrity,
 )
-from cyber_health.core_release import CoreRelease
 from test_support import isolate_host_clis, make_python_command
 
 
@@ -308,7 +304,7 @@ class TestCyberHealthInstaller(BaseInstallerFixture):
         self.assertEqual(compute_sha256(self.source_db), compute_sha256(installer.target_db_path))
 
         # Integrity check passes
-        ok, msg = verify_sqlite_integrity(installer.target_db_path)
+        ok, _msg = verify_sqlite_integrity(installer.target_db_path)
         self.assertTrue(ok)
 
         # Source DB is strictly preserved
@@ -354,7 +350,7 @@ class TestCyberHealthInstaller(BaseInstallerFixture):
             self.assertNotIn("tmp_migration", fname)
 
         # Integrity check passes
-        ok, msg = verify_sqlite_integrity(installer.target_db_path)
+        ok, _msg = verify_sqlite_integrity(installer.target_db_path)
         self.assertTrue(ok)
 
     def test_openclaw_registration_flow(self) -> None:

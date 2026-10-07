@@ -1,16 +1,15 @@
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 from cyber_health.service import CyberHealthService
 from cyber_health.store import SQLiteStore
 
-UTC = timezone.utc
+UTC = UTC
 
 
 class TestCodexScheduleSync(unittest.TestCase):
@@ -262,6 +261,7 @@ class TestCodexScheduleSync(unittest.TestCase):
     def test_mcp_stdio_schedule_sync_lifecycle(self):
         """End-to-end stdio JSON-RPC test simulating host schedule sync: pull -> postpone -> repull -> cancel -> tombstone."""
         import asyncio
+
         from mcp.client.session import ClientSession
         from mcp.client.stdio import StdioServerParameters, stdio_client
 

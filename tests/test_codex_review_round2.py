@@ -42,14 +42,15 @@ class ReviewRoundTwo(unittest.TestCase):
     def test_schedule_ids_stable_across_distinct_requests(self):
         first = self.service.schedule_daily_reminders(user_id="u", date="2026-09-04", idempotency_key="one")
         second = self.service.schedule_daily_reminders(user_id="u", date="2026-09-04", idempotency_key="two")
-        ids = lambda r: {e["event_id"] for e in r["data"]["scheduled_events"]}
+        def ids(r):
+            return {e["event_id"] for e in r["data"]["scheduled_events"]}
         self.assertEqual(ids(first), ids(second))
 
     def test_schedule_respects_new_york_timezone(self):
         self.service.update_profile(user_id="u", timezone="America/New_York", idempotency_key="profile")
         result = self.service.schedule_daily_reminders(user_id="u", date="2026-09-04", idempotency_key="schedule")
         event = next(e for e in result["data"]["scheduled_events"] if e["event_type"] == "MORNING_PLAN")
-        dt = datetime.fromisoformat(event["window_start"].replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(event["window_start"])
         self.assertEqual(dt.astimezone(ZoneInfo("America/New_York")).hour, 7)
 
     def test_profile_red_flag_sets_restricted_mode(self):

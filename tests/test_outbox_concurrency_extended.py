@@ -7,7 +7,7 @@ import unittest
 from datetime import timedelta
 from pathlib import Path
 
-from cyber_health import CyberHealthService, IdempotencyMismatchError
+from cyber_health import CyberHealthService
 from test_support import FIXED_NOW, fixed_clock
 
 

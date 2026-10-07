@@ -31,17 +31,17 @@ def __getattr__(name: str):
 
 
 __all__ = [
-    "CyberHealthError",
-    "CyberHealthService",
-    "CyberHealthInstaller",
-    "CyberHealthUpdater",
-    "CyberHealthUninstaller",
     "ConflictError",
+    "CyberHealthError",
+    "CyberHealthInstaller",
+    "CyberHealthService",
+    "CyberHealthUninstaller",
+    "CyberHealthUpdater",
     "IdempotencyMismatchError",
-    "SafetyRestrictedError",
-    "StoreBusyError",
-    "ValidationError",
     "MemoryProvider",
     "MemoryUnavailable",
+    "SafetyRestrictedError",
+    "StoreBusyError",
     "UnavailableMemoryProvider",
+    "ValidationError",
 ]

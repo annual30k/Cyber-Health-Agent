@@ -8,16 +8,17 @@ rewrites another project's binding, or reads notes outside the managed paths.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
-from typing import Any, Callable
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -103,7 +104,7 @@ def find_obsidian_application() -> Path | None:
                 return candidate.resolve()
         return None
     if sys.platform == "win32":
-        roots = (os.environ.get("LOCALAPPDATA"), os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)"))
+        roots = (os.environ.get("LOCALAPPDATA"), os.environ.get("PROGRAMFILES"), os.environ.get("PROGRAMFILES(X86)"))
         for root in filter(None, roots):
             candidate = Path(root) / "Obsidian" / "Obsidian.exe"
             if candidate.is_file() and not candidate.is_symlink():
@@ -194,8 +195,9 @@ class MemoryBootstrapper:
                 text=True,
                 timeout=45,
                 shell=False,
+                check=False,
             )
-        except Exception as exc:
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
             return 127, "", f"OpenClaw command failed: {exc.__class__.__name__}"
         return result.returncode, result.stdout, result.stderr
 
@@ -251,7 +253,7 @@ class MemoryBootstrapper:
     def _validate_obsidian_application(self, status: MemoryBootstrapStatus) -> bool:
         try:
             application = self.obsidian_application_finder()
-        except Exception:
+        except (OSError, subprocess.SubprocessError, ValueError):
             application = None
         if application is None:
             status.obsidian_action = "install-required"
@@ -274,7 +276,7 @@ class MemoryBootstrapper:
         try:
             text = self.projects_file.read_text(encoding="utf-8")
             raw = yaml.safe_load(text) or {}
-        except Exception:
+        except (OSError, ValueError, yaml.YAMLError):
             status.reason = "Vault projects.yaml contains invalid YAML"
             return None
         if not isinstance(raw, dict) or not isinstance(raw.get("projects"), list):
@@ -497,7 +499,7 @@ class MemoryBootstrapper:
             )
             if code != 0:
                 raise MemoryBootstrapError("OpenClaw could not install the verified obsidian-memory-plugin Release")
-        current, absent, error = self._read_plugin_entry()
+        current, _absent, error = self._read_plugin_entry()
         if error:
             raise MemoryBootstrapError(error)
         if status.plugin_action == "install":
@@ -523,12 +525,12 @@ class MemoryBootstrapper:
             code, _stdout, _stderr = self._run(command)
             if code != 0:
                 raise MemoryBootstrapError("OpenClaw rejected the guarded health-manager memory binding")
-        for field in ("allowPromptInjection", "allowConversationAccess"):
-            current_value = current.get("hooks", {}).get(field) if isinstance(current, dict) and isinstance(current.get("hooks"), dict) else None
+        for hook_field in ("allowPromptInjection", "allowConversationAccess"):
+            current_value = current.get("hooks", {}).get(hook_field) if isinstance(current, dict) and isinstance(current.get("hooks"), dict) else None
             if current_value is True:
                 continue
             command = [
-                "config", "set", f"plugins.entries.{OBSIDIAN_MEMORY_PLUGIN_ID}.hooks.{field}",
+                "config", "set", f"plugins.entries.{OBSIDIAN_MEMORY_PLUGIN_ID}.hooks.{hook_field}",
                 "true", "--strict-json",
             ]
             command.extend(
@@ -537,7 +539,7 @@ class MemoryBootstrapper:
             )
             code, _stdout, _stderr = self._run(command)
             if code != 0:
-                raise MemoryBootstrapError(f"OpenClaw rejected the guarded {field} permission update")
+                raise MemoryBootstrapError(f"OpenClaw rejected the guarded {hook_field} permission update")
         enabled = current.get("enabled") if isinstance(current, dict) else None
         if enabled is not True:
             command = ["config", "set", f"plugins.entries.{OBSIDIAN_MEMORY_PLUGIN_ID}.enabled", "true", "--strict-json"]

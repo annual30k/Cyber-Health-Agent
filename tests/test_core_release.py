@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 
 from cyber_health.core_release import CORE_RELEASE_API, CoreReleaseError, cache_core_release, resolve_latest_core_release
 

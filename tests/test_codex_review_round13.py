@@ -1,13 +1,10 @@
 import asyncio
-import hashlib
 import json
 import os
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
-
+from datetime import UTC, datetime
 from typing import Any
 
 from cyber_health.memory import MemoryUnavailable
@@ -15,7 +12,7 @@ from cyber_health.service import CyberHealthService
 from cyber_health.store import SQLiteStore
 from test_support import fixed_clock
 
-UTC = timezone.utc
+UTC = UTC
 
 
 class MockMemoryProvider:
@@ -388,7 +385,6 @@ class TestCodexReviewRound13(unittest.TestCase):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
 
-                    user_id = "owner"
                     date = "2026-09-05"
 
                     # 1. Propose candidate

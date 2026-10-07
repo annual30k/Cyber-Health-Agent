@@ -11,9 +11,8 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from test_support import FIXED_NOW
-
 from cyber_health import CyberHealthService, IdempotencyMismatchError
+from test_support import FIXED_NOW
 
 USER = "owner"
 DAY = "2026-09-05"

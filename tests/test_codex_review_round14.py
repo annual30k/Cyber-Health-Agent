@@ -1,11 +1,10 @@
 import asyncio
-import hashlib
 import json
 import os
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from cyber_health.memory import MemoryUnavailable
@@ -13,7 +12,7 @@ from cyber_health.service import CyberHealthService
 from cyber_health.store import SQLiteStore
 from test_support import FIXED_NOW, fixed_clock
 
-UTC = timezone.utc
+UTC = UTC
 
 
 class MockMemoryProvider:

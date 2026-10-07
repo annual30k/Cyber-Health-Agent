@@ -7,18 +7,19 @@ pure read snapshots, safety red flag invariants, and out-of-lock memory drainage
 
 from __future__ import annotations
 
+import base64
+import contextlib
 import hashlib
 import json
 import math
 import re
 import uuid
-import base64
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from collections.abc import Callable
 from typing import Any
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .errors import (
     ConflictError,
@@ -36,7 +37,6 @@ from .models import (
     DailyReviewInput,
     DeleteMealInput,
     ExportDataInput,
-    FoodItem,
     GetMemorySuggestionsInput,
     GetRemainingCaloriesInput,
     GetTrainingPlanInput,
@@ -47,7 +47,6 @@ from .models import (
     MaintainMemoryInput,
     MemoryActionInput,
     PlanTomorrowInput,
-    ProfileGoals,
     ProposeMemoryInput,
     QueryKnowledgeInput,
     QueryMemoryInput,
@@ -64,6 +63,12 @@ from .store import SQLiteStore
 # reuse of a generic label (e.g. "lunch-1" on another day or in another session)
 # rather than as a corrupted retry, so the new fact is written instead of rejected.
 DEFAULT_IDEMPOTENCY_REPLAY_WINDOW = timedelta(hours=24)
+
+# Errors that mean a stored timezone name is unusable, so the default zone applies.
+_INVALID_ZONE_ERRORS = (ZoneInfoNotFoundError, ValueError, TypeError)
+# Errors that mean a stored JSON body is malformed or shaped unexpectedly. Narrower than
+# ``Exception`` so SQLite failures and programming errors are never silently skipped.
+_MALFORMED_RECORD_ERRORS = (TypeError, ValueError, AttributeError, KeyError)
 
 RED_FLAG_KEYWORDS = (
     "严重胸痛",
@@ -625,7 +630,7 @@ class CyberHealthService:
 
     def _outside_replay_window(self, created_at: str) -> bool:
         try:
-            created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            created = datetime.fromisoformat(created_at)
         except (AttributeError, ValueError):
             return False
         if created.tzinfo is None:
@@ -688,9 +693,9 @@ class CyberHealthService:
     def _parse_day_in_timezone(occurred_at_iso: str, tz_name: str) -> str:
         try:
             tz = ZoneInfo(tz_name)
-        except Exception:
+        except _INVALID_ZONE_ERRORS:
             tz = ZoneInfo("Asia/Shanghai")
-        dt = datetime.fromisoformat(occurred_at_iso.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(occurred_at_iso)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=tz)
         else:
@@ -734,7 +739,7 @@ class CyberHealthService:
                    WHERE user_id = ? AND occurred_at >= ? AND occurred_at < ? AND status = 'active'""",
                 (user_id, w_start, w_end),
             ).fetchall()
-        except Exception:
+        except ValueError:
             rows = conn.execute(
                 """SELECT meal_id, occurred_at, kcal_low, kcal_high, protein_low, protein_high
                    FROM meal_log
@@ -842,14 +847,12 @@ class CyberHealthService:
         for row in workout_rows:
             try:
                 body = json.loads(row["body_json"]) if row["body_json"] else {}
-            except Exception:
+            except _MALFORMED_RECORD_ERRORS:
                 body = {}
             completion = body.get("completion_rate")
             if completion is not None:
-                try:
+                with contextlib.suppress(TypeError, ValueError):
                     completion_rates.append(float(completion))
-                except (TypeError, ValueError):
-                    pass
             exercises = body.get("completed_exercises") or body.get("actual_sets") or []
             sessions.append(
                 {
@@ -1026,8 +1029,8 @@ class CyberHealthService:
             batch_items = eligible_rows[:50]
             hasher = hashlib.sha256()
             for it in batch_items:
-                hasher.update(f"{it['intent_id']}:{it['attempts']}:{it['status']};".encode("utf-8"))
-            hasher.update(f"ttl:{ttl_meals_count}:{ttl_records_count}:{ttl_sent_count}".encode("utf-8"))
+                hasher.update(f"{it['intent_id']}:{it['attempts']}:{it['status']};".encode())
+            hasher.update(f"ttl:{ttl_meals_count}:{ttl_records_count}:{ttl_sent_count}".encode())
             work_gen_hash = hasher.hexdigest()[:12]
             target_day = day or now_dt.strftime("%Y-%m-%d")
             maintenance_key = f"maint_{user_id}_{target_day}_g{work_gen_hash}"
@@ -1282,7 +1285,7 @@ class CyberHealthService:
             try:
                 self.memory_provider.call("ping", {})
                 mem_status = "ok"
-            except Exception:
+            except Exception:  # noqa: BLE001 - external memory adapter; any failure defers the intent
                 mem_status = "deferred"
             pending_events = conn.execute(
                 "SELECT COUNT(*) AS count FROM schedule_event WHERE status = 'overdue'"
@@ -1321,7 +1324,7 @@ class CyberHealthService:
                 tz_name = profile_row["timezone"] if profile_row else "Asia/Shanghai"
                 try:
                     user_tz = ZoneInfo(tz_name)
-                except Exception:
+                except _INVALID_ZONE_ERRORS:
                     user_tz = ZoneInfo("Asia/Shanghai")
 
                 goals = json.loads(profile_row["goals_json"]) if profile_row and profile_row["goals_json"] else {}
@@ -1358,7 +1361,7 @@ class CyberHealthService:
                 results: list[dict[str, Any]] = []
                 for r in all_rows:
                     item = dict(r)
-                    end_dt = datetime.fromisoformat(item["window_end"].replace("Z", "+00:00"))
+                    end_dt = datetime.fromisoformat(item["window_end"])
                     if end_dt.tzinfo is None:
                         end_dt = end_dt.replace(tzinfo=user_tz)
                     end_utc = end_dt.astimezone(UTC)
@@ -1374,9 +1377,8 @@ class CyberHealthService:
                         item["compensation_required"] = True
 
                     # Overdue events are always returned (for compensation), while others match date
-                    if date:
-                        if effective_status != "overdue" and item_day != date:
-                            continue
+                    if date and effective_status != "overdue" and item_day != date:
+                        continue
 
                     # Determine trigger condition
                     ev_type = item["event_type"]
@@ -1389,7 +1391,7 @@ class CyberHealthService:
                         elif "_lunch" in ev_id:
                             trigger_condition = "lunch_not_logged"
                         else:
-                            start_dt = datetime.fromisoformat(item["window_start"].replace("Z", "+00:00"))
+                            start_dt = datetime.fromisoformat(item["window_start"])
                             if start_dt.tzinfo is None:
                                 start_dt = start_dt.replace(tzinfo=user_tz)
                             start_hour = start_dt.astimezone(user_tz).hour
@@ -1427,7 +1429,7 @@ class CyberHealthService:
                                     p_body = json.loads(plan_row["body_json"])
                                     if p_body.get("status") == "committed":
                                         p_status = "committed"
-                                except Exception:
+                                except _MALFORMED_RECORD_ERRORS:
                                     pass
                                 if p_status == "committed":
                                     eligible = False
@@ -1479,7 +1481,7 @@ class CyberHealthService:
                                         if cr is not None and float(cr) >= 1.0:
                                             completed = True
                                             break
-                                    except Exception:
+                                    except _MALFORMED_RECORD_ERRORS:
                                         pass
 
                                 if completed:
@@ -1496,13 +1498,10 @@ class CyberHealthService:
                                         try:
                                             p_body = json.loads(plan_row["body_json"])
                                             wp = p_body.get("workout_plan")
-                                            if isinstance(wp, str) and ("休息" in wp or "休整" in wp or "rest" in wp.lower()):
+                                            if (isinstance(wp, str) and ("休息" in wp or "休整" in wp or "rest" in wp.lower())) or (isinstance(wp, dict) and (wp.get("is_rest_day") or wp.get("type") == "rest")):
                                                 eligible = False
                                                 suppression_reason = "scheduled_rest_day"
-                                            elif isinstance(wp, dict) and (wp.get("is_rest_day") or wp.get("type") == "rest"):
-                                                eligible = False
-                                                suppression_reason = "scheduled_rest_day"
-                                        except Exception:
+                                        except _MALFORMED_RECORD_ERRORS:
                                             pass
                                     if eligible and (constraints.get("is_rest_day") or goals.get("is_rest_day")):
                                         eligible = False
@@ -2008,7 +2007,7 @@ class CyberHealthService:
                 try:
                     prev_body = json.loads(existing_ds["body_json"])
                     merged_metrics = dict(prev_body.get("metrics", {}))
-                except Exception:
+                except _MALFORMED_RECORD_ERRORS:
                     pass
                 conn.execute(
                     "UPDATE domain_record SET status = 'superseded' WHERE record_id = ?",
@@ -2038,7 +2037,7 @@ class CyberHealthService:
             elif sleep_quality == "good":
                 score += 5.0
 
-            recovery_score = max(0, min(100, int(round(score))))
+            recovery_score = max(0, min(100, round(score)))
             triggered_rules: list[str] = []
             warnings: list[str] = []
             coaching_alert: str | None = None
@@ -2323,7 +2322,7 @@ class CyberHealthService:
                 p_body = json.loads(prog_row["body_json"])
                 if p_body.get("confirmed_weight_kg") is not None:
                     return float(p_body["confirmed_weight_kg"])
-            except Exception:
+            except _MALFORMED_RECORD_ERRORS:
                 pass
 
         # 2. Check latest workout log for weight
@@ -2345,7 +2344,7 @@ class CyberHealthService:
                         ename = (s.get("exercise") or s.get("name") or "").strip().lower()
                         if ename == target_norm and s.get("weight_kg") is not None:
                             return float(s["weight_kg"])
-            except Exception:
+            except _MALFORMED_RECORD_ERRORS:
                 continue
 
         return None
@@ -2451,7 +2450,7 @@ class CyberHealthService:
                 age_days = (cur_d - rec_d).days
                 if 0 <= age_days <= win_days:
                     is_fresh = True
-            except Exception:
+            except (TypeError, ValueError):
                 pass
 
             if is_fresh:
@@ -2485,7 +2484,7 @@ class CyberHealthService:
                             raw_rs = metrics.get("recovery_score")
                         if raw_rs is not None:
                             try:
-                                recovery_score = int(round(float(raw_rs)))
+                                recovery_score = round(float(raw_rs))
                             except (ValueError, TypeError):
                                 recovery_score = None
 
@@ -2496,7 +2495,7 @@ class CyberHealthService:
                             triggered_rules = [str(r) for r in raw_tr]
 
                         coaching_alert = d_body.get("coaching_alert")
-                except Exception:
+                except _MALFORMED_RECORD_ERRORS:
                     pass
 
                 # Unified Fatigue / Sleep Deficit / Recovery Score Check
@@ -2618,7 +2617,7 @@ class CyberHealthService:
         for row in records:
             try:
                 body = json.loads(row["body_json"])
-            except Exception:
+            except _MALFORMED_RECORD_ERRORS:
                 continue
 
             has_exercise = False
@@ -2795,7 +2794,7 @@ class CyberHealthService:
         else:
             return None
 
-        evidence_ids = sorted(list(set(s1["record_ids"] + s2["record_ids"])))
+        evidence_ids = sorted(set(s1["record_ids"] + s2["record_ids"]))
         exercise_slug = re.sub(r"[^a-z0-9_]+", "_", target_norm).strip("_")
         sig_payload = f"{user_id}:{target_norm}:{','.join(evidence_ids)}:{suggested_weight}:{suggested_reps}"
         proposal_sig = hashlib.sha256(sig_payload.encode("utf-8")).hexdigest()[:16]
@@ -3494,7 +3493,7 @@ class CyberHealthService:
             )
 
             # Evaluate genuine maintenance due-work without spamming fake memory candidates
-            now_dt = datetime.fromisoformat(now.replace("Z", "+00:00")) if isinstance(now, str) else self._utcnow()
+            now_dt = datetime.fromisoformat(now) if isinstance(now, str) else self._utcnow()
             due_info = self._calculate_maintenance_due(conn, user_id, now_dt, day=date)
             maint_rec = due_info["due"]
             maint_reason = due_info["reason"]
@@ -3717,7 +3716,7 @@ class CyberHealthService:
 
             try:
                 user_tz = ZoneInfo(tz_name)
-            except Exception:
+            except _INVALID_ZONE_ERRORS:
                 user_tz = ZoneInfo("Asia/Shanghai")
 
             standard_windows = [
@@ -4400,7 +4399,7 @@ class CyberHealthService:
 
             avail_eq = [e.lower() for e in (equipment or [])]
             if not avail_eq:
-                avail_eq = list(orig_def["equipment"]) + ["bodyweight"]
+                avail_eq = [*list(orig_def["equipment"]), "bodyweight"]
 
             candidates: list[dict[str, Any]] = []
             for name, defn in EXERCISE_CATALOG.items():
@@ -4416,7 +4415,7 @@ class CyberHealthService:
                 candidates.append({
                     "name": defn["name"],
                     "movement_pattern": defn["movement_pattern"],
-                    "equipment": list(defn["equipment"])[0],
+                    "equipment": next(iter(defn["equipment"])),
                     "default_sets": defn["default_sets"],
                     "reps_min": defn["reps_min"],
                     "reps_max": defn["reps_max"],
@@ -4740,8 +4739,8 @@ class CyberHealthService:
                     raise ValidationError("timezone must be a non-empty string")
                 try:
                     ZoneInfo(tz)
-                except Exception as err:
-                    raise ValidationError(f"Invalid timezone '{tz}': {err}")
+                except _INVALID_ZONE_ERRORS as err:
+                    raise ValidationError(f"Invalid timezone '{tz}': {err}") from err
 
                 # Safety mode validation
                 VALID_SAFETY_MODES = {"normal", "restricted"}
@@ -4758,8 +4757,8 @@ class CyberHealthService:
                         parsed_goals = json.loads(gj)
                         if not isinstance(parsed_goals, dict):
                             raise ValidationError("goals_json must decode to a dictionary")
-                    except Exception as err:
-                        raise ValidationError(f"Malformed goals_json: {err}")
+                    except (TypeError, ValueError) as err:
+                        raise ValidationError(f"Malformed goals_json: {err}") from err
                 elif "goals" in imported_profile:
                     if not isinstance(imported_profile["goals"], dict):
                         raise ValidationError("goals must be a dictionary")
@@ -4776,8 +4775,8 @@ class CyberHealthService:
                         parsed_constraints = json.loads(cj)
                         if not isinstance(parsed_constraints, dict):
                             raise ValidationError("constraints_json must decode to a dictionary")
-                    except Exception as err:
-                        raise ValidationError(f"Malformed constraints_json: {err}")
+                    except (TypeError, ValueError) as err:
+                        raise ValidationError(f"Malformed constraints_json: {err}") from err
                 elif "constraints" in imported_profile:
                     if not isinstance(imported_profile["constraints"], dict):
                         raise ValidationError("constraints must be a dictionary")
@@ -4795,8 +4794,8 @@ class CyberHealthService:
                         parsed_flags = json.loads(sfj)
                         if not isinstance(parsed_flags, list) or not all(isinstance(x, str) for x in parsed_flags):
                             raise ValidationError("safety_flags_json must decode to a list of strings")
-                    except Exception as err:
-                        raise ValidationError(f"Malformed safety_flags_json: {err}")
+                    except (TypeError, ValueError) as err:
+                        raise ValidationError(f"Malformed safety_flags_json: {err}") from err
                 elif "safety_flags" in imported_profile:
                     if not isinstance(imported_profile["safety_flags"], list) or not all(
                         isinstance(x, str) for x in imported_profile["safety_flags"]
@@ -4818,8 +4817,8 @@ class CyberHealthService:
                     else:
                         try:
                             _check_iso_instant(du)
-                        except Exception as err:
-                            raise ValidationError(f"Invalid deload_until format: {err}")
+                        except (TypeError, ValueError) as err:
+                            raise ValidationError(f"Invalid deload_until format: {err}") from err
 
                 # State version validation
                 iv = imported_profile.get("state_version", before_version)
@@ -4841,9 +4840,8 @@ class CyberHealthService:
 
                 # Protect deload_until: an active deload period cannot be shortened or cleared by an older backup
                 curr_deload = profile["deload_until"]
-                if curr_deload:
-                    if not du or du < curr_deload:
-                        du = curr_deload
+                if curr_deload and (not du or du < curr_deload):
+                    du = curr_deload
 
                 target_version = max(before_version, iv)
                 conn.execute(
@@ -4875,8 +4873,8 @@ class CyberHealthService:
                     raise ValidationError(f"Meal record '{mid}' missing occurred_at timestamp")
                 try:
                     _check_iso_instant(occurred_at)
-                except Exception as err:
-                    raise ValidationError(f"Meal record '{mid}' invalid occurred_at: {err}")
+                except (TypeError, ValueError) as err:
+                    raise ValidationError(f"Meal record '{mid}' invalid occurred_at: {err}") from err
 
                 meal_type = m.get("meal_type")
                 if meal_type not in {"breakfast", "lunch", "dinner", "snack"}:
@@ -4902,8 +4900,8 @@ class CyberHealthService:
                     parsed_foods = json.loads(m_foods)
                     if not isinstance(parsed_foods, list):
                         raise ValidationError(f"foods_json in meal '{mid}' must decode to a list")
-                except Exception as err:
-                    raise ValidationError(f"Malformed foods_json in meal '{mid}': {err}")
+                except (TypeError, ValueError) as err:
+                    raise ValidationError(f"Malformed foods_json in meal '{mid}': {err}") from err
 
                 m_status = m.get("status", "active")
                 if m_status not in {"active", "deleted", "superseded"}:
@@ -4914,7 +4912,7 @@ class CyberHealthService:
                     foods_match = True
                     try:
                         foods_match = json.loads(ex["foods_json"]) == parsed_foods
-                    except Exception:
+                    except _MALFORMED_RECORD_ERRORS:
                         foods_match = (ex["foods_json"] == m_foods)
 
                     # All persisted fields checked including causation_id and state_version
@@ -4977,8 +4975,8 @@ class CyberHealthService:
                     raise ValidationError(f"Domain record '{rid}' must have non-empty string 'kind' and 'day'")
                 try:
                     _check_real_date(day)
-                except Exception as err:
-                    raise ValidationError(f"Domain record '{rid}' invalid day: {err}")
+                except (TypeError, ValueError) as err:
+                    raise ValidationError(f"Domain record '{rid}' invalid day: {err}") from err
 
                 d_status = d.get("status", "active")
                 if d_status not in {"active", "superseded", "deleted"}:
@@ -4995,15 +4993,15 @@ class CyberHealthService:
                     parsed_body = json.loads(d_body)
                     if not isinstance(parsed_body, dict):
                         raise ValidationError(f"body_json in domain record '{rid}' must decode to an object")
-                except Exception as err:
-                    raise ValidationError(f"Malformed body_json in domain record '{rid}': {err}")
+                except (TypeError, ValueError) as err:
+                    raise ValidationError(f"Malformed body_json in domain record '{rid}': {err}") from err
 
                 ex = conn.execute("SELECT * FROM domain_record WHERE record_id = ?", (rid,)).fetchone()
                 if ex:
                     body_match = True
                     try:
                         body_match = json.loads(ex["body_json"]) == parsed_body
-                    except Exception:
+                    except _MALFORMED_RECORD_ERRORS:
                         body_match = (ex["body_json"] == d_body)
 
                     if (
@@ -5058,8 +5056,8 @@ class CyberHealthService:
                 try:
                     _check_iso_instant(w_start)
                     _check_iso_instant(w_end)
-                except Exception as err:
-                    raise ValidationError(f"Schedule event '{sid}' invalid window instant: {err}")
+                except (TypeError, ValueError) as err:
+                    raise ValidationError(f"Schedule event '{sid}' invalid window instant: {err}") from err
 
                 s_status = s.get("status", "pending")
                 if s_status not in {"pending", "delivered", "acknowledged", "skipped", "overdue", "cancelled"}:
@@ -5119,8 +5117,8 @@ class CyberHealthService:
                 if op_resp:
                     try:
                         json.loads(op_resp)
-                    except Exception as err:
-                        raise ValidationError(f"Malformed response_json in operation '{opid}': {err}")
+                    except (TypeError, ValueError) as err:
+                        raise ValidationError(f"Malformed response_json in operation '{opid}': {err}") from err
 
                 ex = conn.execute("SELECT * FROM operation_log WHERE operation_id = ?", (opid,)).fetchone()
                 if ex:
@@ -5239,11 +5237,10 @@ class CyberHealthService:
                 "SELECT operation_id, request_hash, result_status FROM operation_log WHERE user_id = ? AND idempotency_key = ?",
                 (user_id, idempotency_key),
             ).fetchone()
-            if row:
-                if row["request_hash"] != request_hash:
-                    raise IdempotencyMismatchError(
-                        f"Idempotency key '{idempotency_key}' was previously used with a different request or action."
-                    )
+            if row and row["request_hash"] != request_hash:
+                raise IdempotencyMismatchError(
+                    f"Idempotency key '{idempotency_key}' was previously used with a different request or action."
+                )
 
             self._ensure_profile_in_tx(conn, user_id, now)
             profile = conn.execute("SELECT state_version FROM user_profile WHERE user_id = ?", (user_id,)).fetchone()
@@ -5315,7 +5312,7 @@ class CyberHealthService:
         try:
             provider_result = self.memory_provider.call(method, call_payload)
             provider_success = True
-        except (MemoryUnavailable, Exception):
+        except Exception:  # noqa: BLE001 - external memory adapter; any failure defers the intent
             provider_success = False
 
         # Phase 3: Short transaction to update outbox status, state_version, and operation log
@@ -5476,7 +5473,7 @@ class CyberHealthService:
                     else:
                         raise
                 results.append((intent_id, True, res))
-            except (MemoryUnavailable, Exception):
+            except Exception:  # noqa: BLE001 - external memory adapter; any failure defers the intent
                 results.append((intent_id, False, None))
 
         # 3. Short write transaction to update final outbox statuses and evaluate prune candidates
@@ -5560,10 +5557,10 @@ class CyberHealthService:
 
             # Local weekly trend consolidation for historical meals older than cutoff_date
             consolidated_trends_count = 0
-            user_tz_name = profile["timezone"] if (profile and "timezone" in profile.keys()) else "Asia/Shanghai"
+            user_tz_name = profile["timezone"] if (profile and "timezone" in profile) else "Asia/Shanghai"
             try:
                 user_tz = ZoneInfo(user_tz_name)
-            except Exception:
+            except _INVALID_ZONE_ERRORS:
                 user_tz = ZoneInfo("UTC")
 
             historical_meals = conn.execute(
@@ -5579,12 +5576,12 @@ class CyberHealthService:
                 for m in historical_meals:
                     occ = m["occurred_at"]
                     try:
-                        dt = datetime.fromisoformat(occ.replace("Z", "+00:00"))
+                        dt = datetime.fromisoformat(occ)
                         if dt.tzinfo is None:
                             local_dt = dt.replace(tzinfo=user_tz)
                         else:
                             local_dt = dt.astimezone(user_tz)
-                    except Exception:
+                    except (TypeError, ValueError):
                         local_dt = datetime.strptime(occ[:10], "%Y-%m-%d").replace(tzinfo=user_tz)
 
                     year, week, _ = local_dt.isocalendar()
@@ -5617,7 +5614,7 @@ class CyberHealthService:
                 for iso_week, winfo in weeks_map.items():
                     window_days = 7
                     days_dict = winfo["days"]
-                    recorded_dates = sorted(list(days_dict.keys()))
+                    recorded_dates = sorted(days_dict.keys())
                     recorded_days = len(recorded_dates)
                     if recorded_days == 0:
                         continue
@@ -5667,7 +5664,7 @@ class CyberHealthService:
                     if existing_trend:
                         try:
                             ex_body = json.loads(existing_trend["body_json"])
-                        except Exception:
+                        except _MALFORMED_RECORD_ERRORS:
                             ex_body = {}
                         has_changed = (
                             ex_body.get("total_meals") != total_meals or
@@ -5730,7 +5727,7 @@ class CyberHealthService:
                     try:
                         b = json.loads(ex_trend["body_json"])
                         w_end = b.get("window_end", "")
-                    except Exception:
+                    except _MALFORMED_RECORD_ERRORS:
                         w_end = ""
                     if not w_end or w_end < cutoff_date:
                         conn.execute(
@@ -5865,7 +5862,7 @@ class CyberHealthService:
                                 "confidence": 1.0,
                                 "confirmation_status": "committed",
                             })
-                except Exception:
+                except _MALFORMED_RECORD_ERRORS:
                     pass
 
             # 2. Domain records (workouts, reviews, daily state, trends)
@@ -5882,7 +5879,7 @@ class CyberHealthService:
                 if any(term in b_lower for term in terms):
                     try:
                         b_dict = json.loads(b_str)
-                    except Exception:
+                    except _MALFORMED_RECORD_ERRORS:
                         b_dict = {}
                     summary_text = (
                         b_dict.get("discomfort_notes")
@@ -5942,7 +5939,7 @@ class CyberHealthService:
 
                     # Status must preserve actual source status; never fabricate 'confirmed_wiki' if absent
                     raw_status = it.get("confirmation_status")
-                    conf_status = raw_status if raw_status else "unconfirmed"
+                    conf_status = raw_status or "unconfirmed"
 
                     # Confidence must reflect evidence; never invent fake default like 0.9
                     conf_val = it.get("confidence")
@@ -5964,7 +5961,7 @@ class CyberHealthService:
                     })
                 # Bound returned memories strictly by caller's requested limit
                 obsidian_memories = obsidian_memories[:limit]
-        except (MemoryUnavailable, Exception) as exc:
+        except Exception as exc:  # noqa: BLE001 - external memory adapter; any failure defers the intent
             provider_available = False
             obsidian_memories = []
             warnings.append(
@@ -6055,7 +6052,7 @@ class CyberHealthService:
             if payload.get("candidate_key") != candidate_key:
                 continue
             try:
-                created_at = datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
+                created_at = datetime.fromisoformat(str(row["created_at"]))
                 if created_at.tzinfo is None:
                     created_at = created_at.replace(tzinfo=UTC)
             except (TypeError, ValueError):
@@ -6071,7 +6068,7 @@ class CyberHealthService:
         """Count today's proposals without changing state."""
         try:
             tz = ZoneInfo(tz_name)
-        except Exception:
+        except _INVALID_ZONE_ERRORS:
             tz = ZoneInfo("Asia/Shanghai")
         local_today = now.astimezone(tz).strftime("%Y-%m-%d")
         rows = conn.execute(
@@ -6084,7 +6081,7 @@ class CyberHealthService:
         count = 0
         for row in rows:
             try:
-                created_at = datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
+                created_at = datetime.fromisoformat(str(row["created_at"]))
                 if created_at.tzinfo is None:
                     created_at = created_at.replace(tzinfo=UTC)
                 if created_at.astimezone(tz).strftime("%Y-%m-%d") == local_today:
@@ -6359,8 +6356,8 @@ class CyberHealthService:
 
 
 __all__ = [
-    "CyberHealthService",
     "ConflictError",
+    "CyberHealthService",
     "IdempotencyMismatchError",
     "SafetyRestrictedError",
     "StoreBusyError",
