@@ -44,6 +44,9 @@ if _spec:
 
     _core.resolve_latest_core_release = _local_release
 '''
+# Releases before this one cannot replace their own running cyber-health.exe on Windows,
+# so the smoke test starts their updater through python -m (the documented workaround).
+FIRST_WINDOWS_SELF_UPGRADE = (0, 6, 2)
 IGNORED = shutil.ignore_patterns(".git", ".venv", "dist", "data", "__pycache__", ".ruff_cache", ".pytest_cache", "*.sqlite3*")
 
 
@@ -111,17 +114,21 @@ def wheel_version(wheel: Path) -> str:
     return match.group(1)
 
 
-def build_candidate(work: Path) -> tuple[Path, str]:
-    """Build this source tree as ``<version>+smoke`` so it always differs from the parent."""
-    src = work / "candidate-src"
+def version_tuple(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in re.findall(r"\d+", version.split("+")[0])[:3])
+
+
+def build_candidate(work: Path, label: str = "smoke") -> tuple[Path, str]:
+    """Build this source tree as ``<version>+<label>`` so it always differs from the parent."""
+    src = work / f"candidate-src-{label}"
     shutil.copytree(REPO_ROOT, src, ignore=IGNORED)
     pyproject = src / "pyproject.toml"
     base = re.search(r'^version = "([^"]+)"', pyproject.read_text(encoding="utf-8"), re.MULTILINE).group(1)
-    version = f"{base.split('+')[0]}+smoke"
+    version = f"{base.split('+')[0]}+{label}"
     pyproject.write_text(re.sub(r'^version = "[^"]+"', f'version = "{version}"', pyproject.read_text(encoding="utf-8"), count=1, flags=re.MULTILINE), encoding="utf-8")
     for init in (src / "cyber_health" / "__init__.py", src / "cyber_health_mcp" / "__init__.py"):
         init.write_text(re.sub(r'__version__ = "[^"]+"', f'__version__ = "{version}"', init.read_text(encoding="utf-8"), count=1), encoding="utf-8")
-    out = work / "candidate"
+    out = work / f"candidate-{label}"
     run(["uv", "build", "--wheel", "-o", str(out), str(src)])
     return next(out.glob("*.whl")), version
 
@@ -178,9 +185,13 @@ def main() -> int:
         print("2. upgrade with the previous Release's own updater")
         serve(target_python, candidate_wheel, candidate_version, work / "candidate.json")
         update_env = {**env, SMOKE_ENV: str(work / "candidate.json")}
-        update_cmd = [str(exe(target_scripts, "cyber-health")), "update", "--target-dir", str(target),
-                      "--openclaw-bin", "", "--codex-bin", "", "--hermes-bin", "", "--json"]
-        report = run_json(update_cmd, env=update_env, cwd=neutral)
+        update_args = ["--target-dir", str(target), "--openclaw-bin", "", "--codex-bin", "", "--hermes-bin", "", "--json"]
+        update_cmd = [str(exe(target_scripts, "cyber-health")), "update", *update_args]
+        parent_cmd = update_cmd
+        if os.name == "nt" and version_tuple(parent_version) < FIRST_WINDOWS_SELF_UPGRADE:
+            print(f"  note: {parent_version} cannot replace its own running launcher on Windows; using python -m")
+            parent_cmd = [str(target_python), "-P", "-m", "cyber_health.update", *update_args]
+        report = run_json(parent_cmd, env=update_env, cwd=neutral)
         check(report.get("success") is True, f"update succeeded ({report.get('message')})")
         check(report.get("old_version") == parent_version, f"old version reported as {parent_version}")
         check(report.get("new_version") == candidate_version, f"new version reported as {candidate_version}")
@@ -207,6 +218,19 @@ def main() -> int:
         status = run_json([str(exe(target_scripts, "cyber-health")), "status", "--target-dir", str(target), "--json"],
                           env=update_env, cwd=neutral)
         check(status.get("version") == candidate_version, f"status shows {candidate_version}")
+
+        print("4. this build upgrades itself through its own cyber-health launcher")
+        next_wheel, next_version = build_candidate(work, "smoke.2")
+        serve(target_python, next_wheel, next_version, work / "next.json")
+        self_report = run_json(update_cmd, env={**env, SMOKE_ENV: str(work / "next.json")}, cwd=neutral)
+        check(self_report.get("success") is True, f"self-upgrade succeeded ({self_report.get('message')})")
+        check(self_report.get("handed_off") is True and self_report.get("finished_by") == next_version,
+              "the next build finished its own upgrade")
+        meta = json.loads((target / "config" / "installation.json").read_text(encoding="utf-8"))
+        check(meta.get("version") == next_version, f"installation metadata records {next_version}")
+        installed = run([str(target_python), "-P", "-c", "import cyber_health; print(cyber_health.__version__)"], cwd=neutral)
+        check(installed.stdout.strip() == next_version, "installed package is the next build")
+        check(exe(target_scripts, "cyber-health").exists(), "cyber-health launcher present after self-upgrade")
         print("upgrade smoke test passed")
         return 0
     except SmokeFailure as failure:

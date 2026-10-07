@@ -15,6 +15,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .windows_launchers import remove_stale_launchers
+
 DEFAULT_BACKUP_RETENTION = 10
 ROLLING_BACKUP_PATTERN = re.compile(r"^cyber-health-backup-\d{8}_\d{6}\.sqlite3$")
 PRIVATE_DIRS = ("", "data", "data/backups", "config", "releases", "bin")
@@ -106,6 +108,9 @@ def run_housekeeping(
     status = HousekeepingStatus(dry_run=dry_run)
     data_dir = target_dir / "data"
     remove_orphaned_migration_sidecars(data_dir, status)
+    if not dry_run:
+        venv_scripts = target_dir / "venv" / ("Scripts" if sys.platform == "win32" else "bin")
+        status.temp_files_removed.extend(remove_stale_launchers(venv_scripts))
     prune_backups(data_dir / "backups", status, keep=keep_backups)
     secure_permissions(target_dir, status)
     return status

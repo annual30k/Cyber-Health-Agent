@@ -94,6 +94,7 @@ Update behavior (v0.5.1+):
 - `cyber-health update --check` (or `cyber-health status --check-updates`) only reports whether a newer stable Release exists; nothing is changed. Plain `status` never contacts GitHub.
 - When the installed version is already the latest Release, `update` exits immediately without a backup or reinstall; `--force` reinstalls and re-verifies anyway.
 - After installing a new version, the updater hands the remaining steps (schema verification, host registration checks, metadata) to the newly installed code, so new behavior applies in the same run. If the new version cannot finish, the previous updater completes the verification and says so.
+- On Windows, the updater moves its own locked launchers (`cyber-health*.exe`, e.g. while it runs or while a host keeps the MCP server alive) aside before installing and restores them if the install fails (v0.6.2+). Releases up to 0.6.1 cannot replace their own running `cyber-health.exe`; upgrade those once with `& "$HOME\.cyber-health\venv\Scripts\python.exe" -m cyber_health.update --json`.
 - Every successful install/update makes the installation private to the current user (directories `0700`, data files `0600`), keeps the newest 10 rolling update backups (`--keep-backups N`; pre-migration backups are never pruned), and removes orphaned temporary migration files.
 
 When installing Cyber Health for Codex, OpenClaw, or Hermes, the required installation entry point is

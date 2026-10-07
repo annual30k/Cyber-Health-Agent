@@ -56,6 +56,7 @@ from .memory_plugin_release import (
 from .obsidian_memory_provider import ObsidianMemoryProvider
 from .service import CyberHealthService
 from .uninstall import verify_cyber_health_command_signature
+from .windows_launchers import move_aside_launchers, remove_stale_launchers, restore_launchers
 
 _DEFAULT_BIN = object()
 
@@ -385,10 +386,18 @@ class CyberHealthUpdater:
         else:
             cmd = [str(venv_python), "-m", "pip", "install", "--upgrade", str(package_source)]
 
-        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        scripts_dir = get_venv_bin_dir(self.venv_dir)
+        moved = move_aside_launchers(scripts_dir)  # Windows: the running launcher is locked
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        except (OSError, subprocess.SubprocessError):
+            restore_launchers(moved)
+            raise
         if res.returncode != 0:
+            restore_launchers(moved)
             raise UpdaterError(f"Failed to upgrade package in virtual environment: {res.stderr.strip()}")
-
+        restore_launchers(moved)  # keeps any launcher the install did not recreate
+        remove_stale_launchers(scripts_dir)
         return True
 
     def verify_schema_and_service(self) -> bool:

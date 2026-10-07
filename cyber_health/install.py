@@ -46,6 +46,7 @@ from .memory_plugin_release import (
     resolve_latest_memory_plugin_release,
 )
 from .uninstall import verify_cyber_health_command_signature
+from .windows_launchers import move_aside_launchers, remove_stale_launchers, restore_launchers
 
 FIXED_OPENCLAW_SERVER_NAME = "cyber-health"
 DEFAULT_INSTALL_DIR_NAME = ".cyber-health"
@@ -823,6 +824,8 @@ class CyberHealthInstaller:
         uv_bin = shutil.which("uv") if self.use_uv else None
         venv_python = get_venv_bin_dir(self.venv_dir) / get_executable_name("python")
 
+        # Windows: a running cyber-health-mcp.exe (or cyber-health.exe) is locked.
+        moved = move_aside_launchers(get_venv_bin_dir(self.venv_dir))
         if uv_bin:
             # Create venv with uv
             if not self.venv_dir.exists():
@@ -841,6 +844,7 @@ class CyberHealthInstaller:
 
             res_install = subprocess.run(install_args, capture_output=True, text=True, check=False)
             if res_install.returncode != 0:
+                restore_launchers(moved)
                 raise InstallerError(f"Failed to install package with uv pip: {res_install.stderr.strip()}")
         else:
             # Fallback to standard Python venv
@@ -858,7 +862,11 @@ class CyberHealthInstaller:
 
             res_install = subprocess.run(install_cmd, capture_output=True, text=True, check=False)
             if res_install.returncode != 0:
+                restore_launchers(moved)
                 raise InstallerError(f"Failed to install package with pip: {res_install.stderr.strip()}")
+
+        restore_launchers(moved)  # keeps any launcher the install did not recreate
+        remove_stale_launchers(get_venv_bin_dir(self.venv_dir))
 
         # Ensure executable wrappers/symlinks in bin/
         target_mcp = get_venv_bin_dir(self.venv_dir) / get_executable_name("cyber-health-mcp")
