@@ -31,13 +31,14 @@ from cyber_health.uninstall import (
     format_text_report,
     main,
 )
-from test_support import make_python_command
+from test_support import isolate_host_clis, make_python_command, runnable_cli
 
 
 class BaseFakeHostTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory(prefix="cyber-health-uninstall-test-")
         self.test_dir = Path(self.temp_dir.name).resolve()
+        isolate_host_clis(self, self.test_dir, "uninstall")
 
         # Isolated project root
         self.project_root = self.test_dir / "CyberHealthProject"
@@ -728,9 +729,9 @@ class TestCLIEntrypoint(BaseFakeHostTest):
 class TestLiveOpenClawProbe(unittest.TestCase):
     def test_live_openclaw_cli_in_sandbox_if_available(self) -> None:
         """Opt-in smoke test with real openclaw binary using sandbox config without touching host state."""
-        real_openclaw = shutil.which("openclaw")
+        real_openclaw = runnable_cli("openclaw")
         if not real_openclaw:
-            self.skipTest("openclaw CLI not found in PATH")
+            self.skipTest("openclaw CLI not found in PATH or not runnable")
 
         with tempfile.TemporaryDirectory(prefix="cyber-health-live-probe-") as td:
             sandbox = Path(td).resolve()
@@ -776,6 +777,8 @@ class TestLiveOpenClawProbe(unittest.TestCase):
                 project_root=proj_root,
                 db_path=db_file,
                 openclaw_bin=real_openclaw,
+                codex_bin=None,
+                hermes_bin=None,
                 openclaw_config=cfg_path,
                 openclaw_state_dir=sandbox / "state",
                 launchagent_dir=sandbox / "LaunchAgents",

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 from cyber_health import CyberHealthService, IdempotencyMismatchError
+from test_support import FIXED_NOW, fixed_clock
 
 
 class MockWorkingProvider:
@@ -25,7 +26,7 @@ class OutboxConcurrencyExtendedTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.db_path = Path(self.tmp.name) / "test_outbox_ext.sqlite3"
         self.provider = MockWorkingProvider()
-        self.service = CyberHealthService(self.db_path, memory_provider=self.provider)
+        self.service = CyberHealthService(self.db_path, memory_provider=self.provider, clock=fixed_clock())
 
     def test_concurrent_same_key_same_payload_replay(self) -> None:
         """Exact repeat returns cached result without invoking Provider a second time."""
@@ -50,7 +51,7 @@ class OutboxConcurrencyExtendedTests(unittest.TestCase):
 
     def test_batch_over_fifty_items_chunking(self) -> None:
         """When outbox has >50 items, maintainer claims exactly 50 and leaves the rest pending."""
-        now = datetime.now(UTC).isoformat()
+        now = FIXED_NOW.isoformat()
         with self.service.store.connect() as conn:
             for i in range(65):
                 intent_id = f"intent_bulk_{i:03d}"
@@ -85,7 +86,7 @@ class OutboxConcurrencyExtendedTests(unittest.TestCase):
 
     def test_crashed_worker_lease_recovery(self) -> None:
         """Rows left in_flight by a crashed worker with expired lease are safely recovered."""
-        expired_time = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
+        expired_time = (FIXED_NOW - timedelta(minutes=5)).isoformat()
         with self.service.store.connect() as conn:
             conn.execute(
                 """INSERT INTO memory_outbox(
@@ -109,8 +110,8 @@ class OutboxConcurrencyExtendedTests(unittest.TestCase):
 
     def test_real_physical_ttl_pruning(self) -> None:
         """Physical deletion of superseded domain records and sent outbox items older than prune_days."""
-        old_time = (datetime.now(UTC) - timedelta(days=45)).isoformat()
-        recent_time = (datetime.now(UTC) - timedelta(days=5)).isoformat()
+        old_time = (FIXED_NOW - timedelta(days=45)).isoformat()
+        recent_time = (FIXED_NOW - timedelta(days=5)).isoformat()
 
         with self.service.store.connect() as conn:
             # Old superseded record (should be deleted)

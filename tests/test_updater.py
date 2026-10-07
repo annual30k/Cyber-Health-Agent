@@ -24,12 +24,14 @@ from cyber_health.update import (
 )
 from cyber_health.memory_plugin_release import MemoryPluginRelease
 from cyber_health.core_release import CoreRelease
+from test_support import isolate_host_clis
 
 
 class BaseUpdaterFixture(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory(prefix="cyber-health-update-test-")
         self.test_dir = Path(self.temp_dir.name).resolve()
+        isolate_host_clis(self, self.test_dir, "update")
 
         # Source project
         self.source_root = self.test_dir / "CyberHealthSource"

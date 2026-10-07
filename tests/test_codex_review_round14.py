@@ -11,6 +11,7 @@ from typing import Any
 from cyber_health.memory import MemoryUnavailable
 from cyber_health.service import CyberHealthService
 from cyber_health.store import SQLiteStore
+from test_support import FIXED_NOW, fixed_clock
 
 UTC = timezone.utc
 
@@ -38,7 +39,7 @@ class TestCodexReviewRound14(unittest.TestCase):
         self.db_path = os.path.join(self.temp_dir.name, "test_round14.db")
         self.store = SQLiteStore(self.db_path)
         self.memory_provider = MockMemoryProvider()
-        self.service = CyberHealthService(self.store, memory_provider=self.memory_provider)
+        self.service = CyberHealthService(self.store, memory_provider=self.memory_provider, clock=fixed_clock())
 
     def tearDown(self):
         self.temp_dir.cleanup()
@@ -189,7 +190,7 @@ class TestCodexReviewRound14(unittest.TestCase):
         today_date = "2026-09-05"
 
         # Insert 55 pending outbox items directly
-        now_iso = datetime.now(UTC).isoformat()
+        now_iso = FIXED_NOW.isoformat()
         with self.store.connect() as conn:
             for i in range(55):
                 conn.execute(

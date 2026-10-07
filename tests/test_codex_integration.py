@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import shutil
 import tempfile
 import textwrap
 import unittest
@@ -13,7 +12,7 @@ from cyber_health.codex_integration import (
     plan_codex_registration,
     remove_codex_registration,
 )
-from test_support import make_python_command
+from test_support import make_python_command, runnable_cli
 
 
 class CodexIntegrationTests(unittest.TestCase):
@@ -103,9 +102,9 @@ class CodexIntegrationTests(unittest.TestCase):
         self.assertFalse(status.ownership_proven)
 
     def test_real_codex_cli_round_trip_isolated_from_user_config(self) -> None:
-        real_codex = shutil.which("codex")
+        real_codex = runnable_cli("codex")
         if not real_codex:
-            self.skipTest("Codex CLI not installed")
+            self.skipTest("Codex CLI not installed or not runnable")
         isolated_home = self.root / "codex-home"
         isolated_home.mkdir()
         status = plan_codex_registration(

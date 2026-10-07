@@ -27,13 +27,14 @@ from cyber_health.install import (
     verify_sqlite_integrity,
 )
 from cyber_health.core_release import CoreRelease
-from test_support import make_python_command
+from test_support import isolate_host_clis, make_python_command
 
 
 class BaseInstallerFixture(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory(prefix="cyber-health-install-test-")
         self.test_dir = Path(self.temp_dir.name).resolve()
+        isolate_host_clis(self, self.test_dir, "install")
 
         # Isolated source project
         self.source_root = self.test_dir / "CyberHealthSource"

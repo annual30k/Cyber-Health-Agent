@@ -16,6 +16,7 @@ import base64
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -57,6 +58,12 @@ from .models import (
     _check_real_date,
 )
 from .store import SQLiteStore
+
+# Idempotency keys exist to make retries safe; real retries arrive within minutes.
+# After this window a key that collides with a *different* request is treated as
+# reuse of a generic label (e.g. "lunch-1" on another day or in another session)
+# rather than as a corrupted retry, so the new fact is written instead of rejected.
+DEFAULT_IDEMPOTENCY_REPLAY_WINDOW = timedelta(hours=24)
 
 RED_FLAG_KEYWORDS = (
     "严重胸痛",
@@ -396,6 +403,8 @@ class CyberHealthService:
         database_path: str | Path | SQLiteStore,
         memory_provider: MemoryProvider | None = None,
         recovery_evidence_window_days: int = 1,
+        clock: Callable[[], datetime] | None = None,
+        idempotency_replay_window: timedelta = DEFAULT_IDEMPOTENCY_REPLAY_WINDOW,
     ) -> None:
         if isinstance(database_path, SQLiteStore):
             self.store = database_path
@@ -403,10 +412,18 @@ class CyberHealthService:
             self.store = SQLiteStore(database_path)
         self.memory_provider: MemoryProvider = memory_provider or UnavailableMemoryProvider()
         self.recovery_evidence_window_days: int = recovery_evidence_window_days
+        # Injectable wall clock so date-sensitive rules (deload windows, leases, TTL) are testable.
+        self._clock: Callable[[], datetime] = clock or (lambda: datetime.now(UTC))
+        self.idempotency_replay_window: timedelta = idempotency_replay_window
 
-    @staticmethod
-    def _now() -> str:
-        return datetime.now(UTC).isoformat()
+    def _utcnow(self) -> datetime:
+        now_dt = self._clock()
+        if now_dt.tzinfo is None:
+            return now_dt.replace(tzinfo=UTC)
+        return now_dt.astimezone(UTC)
+
+    def _now(self) -> str:
+        return self._utcnow().isoformat()
 
     @staticmethod
     def _scan_for_red_flags(text: str) -> list[str]:
@@ -564,21 +581,64 @@ class CyberHealthService:
         idempotency_key: str,
         action: str,
         payload: dict[str, Any],
+        *,
+        recompute_when_stale: bool = False,
+        allow_key_reuse: bool = True,
     ) -> dict[str, Any] | None:
+        """Return the cached response for a genuine retry, or ``None`` to execute.
+
+        ``recompute_when_stale`` is for results derived from the whole fact state
+        (daily review, tomorrow's plan): an identical request replays only while no
+        other write has happened since, so a date-stable key never returns a stale
+        review after a late meal is logged.  ``allow_key_reuse=False`` keeps the strict
+        mismatch for callers whose external intent ids are derived from the key.
+        """
         row = conn.execute(
-            "SELECT action, request_hash, result_status, response_json FROM operation_log WHERE user_id = ? AND idempotency_key = ?",
+            """SELECT operation_id, action, request_hash, result_status, after_version, response_json, created_at
+               FROM operation_log WHERE user_id = ? AND idempotency_key = ?""",
             (user_id, idempotency_key),
         ).fetchone()
         if not row:
             return None
         current_hash = self._request_hash(payload)
         if row["action"] != action or row["request_hash"] != current_hash:
+            if allow_key_reuse and self._outside_replay_window(row["created_at"]):
+                self._retire_idempotency_key(conn, row["operation_id"], idempotency_key)
+                return None
             raise IdempotencyMismatchError(
-                f"Idempotency key '{idempotency_key}' was previously used with a different request or action."
+                f"Idempotency key '{idempotency_key}' already belongs to a different {row['action']} request "
+                f"committed at {row['created_at']} (operation {row['operation_id']}); nothing was written. "
+                "Reuse a key only to retry the identical call. If this is a new fact, retry with a fresh unique "
+                "key such as '<tool>-<local date>-<random suffix>'. If it is the same fact, it is already "
+                "recorded: read it back or revise it instead of logging it again."
             )
         if row["result_status"] == "pending":
             return None
+        if recompute_when_stale:
+            profile = conn.execute(
+                "SELECT state_version FROM user_profile WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            if profile is not None and profile["state_version"] != row["after_version"]:
+                self._retire_idempotency_key(conn, row["operation_id"], idempotency_key)
+                return None
         return json.loads(row["response_json"])
+
+    def _outside_replay_window(self, created_at: str) -> bool:
+        try:
+            created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        except (AttributeError, ValueError):
+            return False
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=UTC)
+        return self._utcnow() - created >= self.idempotency_replay_window
+
+    @staticmethod
+    def _retire_idempotency_key(conn: Any, operation_id: str, idempotency_key: str) -> None:
+        """Free a key for a new operation while keeping the original row in the audit log."""
+        conn.execute(
+            "UPDATE operation_log SET idempotency_key = ? WHERE operation_id = ?",
+            (f"{idempotency_key}#retired:{operation_id}", operation_id),
+        )
 
     def _record_operation(
         self,
@@ -892,7 +952,7 @@ class CyberHealthService:
         prune_days: int = 30,
     ) -> dict[str, Any]:
         """Strictly pure-read evaluation of maintenance due work across outbox, leases, and TTL facts."""
-        now_dt = now_dt or datetime.now(UTC)
+        now_dt = now_dt or self._utcnow()
         now_iso = now_dt.isoformat()
         cutoff_date = (now_dt - timedelta(days=prune_days)).strftime("%Y-%m-%d")
         cutoff_iso = (now_dt - timedelta(days=prune_days)).isoformat()
@@ -1010,7 +1070,7 @@ class CyberHealthService:
         except Exception as err:
             raise ValidationError(f"Invalid date format: {day}") from err
 
-        now_dt = now or datetime.now(UTC)
+        now_dt = now or self._utcnow()
 
         with self.store.connect() as conn:
             conn.execute("BEGIN")
@@ -1245,7 +1305,7 @@ class CyberHealthService:
         now: datetime | None = None,
         include_inactive: bool = False,
     ) -> list[dict[str, Any]]:
-        now_dt = now or datetime.now(UTC)
+        now_dt = now or self._utcnow()
         if now_dt.tzinfo is None:
             now_dt = now_dt.replace(tzinfo=UTC)
         now_utc = now_dt.astimezone(UTC)
@@ -1833,7 +1893,7 @@ class CyberHealthService:
                     )
                 safety_mode = "normal"
                 new_safety_flags = []
-                deload_until = (datetime.now(UTC) + timedelta(days=7)).isoformat()
+                deload_until = (self._utcnow() + timedelta(days=7)).isoformat()
                 warnings.append(
                     f"RECOVERY_FLAG_CLEAR_01: Safety cleared with reason '{clearance_reason}'. "
                     "Initiated 7-day Deload Period: load <= 50-60% baseline, RIR >= 3, no failure."
@@ -3164,7 +3224,9 @@ class CyberHealthService:
         now, operation_id = self._now(), f"op_{uuid.uuid4().hex}"
 
         with self.store.transaction() as conn:
-            existing = self._check_idempotency(conn, user_id, idempotency_key, "daily_review", payload)
+            existing = self._check_idempotency(
+                conn, user_id, idempotency_key, "daily_review", payload, recompute_when_stale=True
+            )
             if existing:
                 return existing
 
@@ -3432,7 +3494,7 @@ class CyberHealthService:
             )
 
             # Evaluate genuine maintenance due-work without spamming fake memory candidates
-            now_dt = datetime.fromisoformat(now.replace("Z", "+00:00")) if isinstance(now, str) else datetime.now(UTC)
+            now_dt = datetime.fromisoformat(now.replace("Z", "+00:00")) if isinstance(now, str) else self._utcnow()
             due_info = self._calculate_maintenance_due(conn, user_id, now_dt, day=date)
             maint_rec = due_info["due"]
             maint_reason = due_info["reason"]
@@ -3525,7 +3587,9 @@ class CyberHealthService:
         now, operation_id = self._now(), f"op_{uuid.uuid4().hex}"
 
         with self.store.transaction() as conn:
-            existing = self._check_idempotency(conn, user_id, idempotency_key, "plan_tomorrow", payload)
+            existing = self._check_idempotency(
+                conn, user_id, idempotency_key, "plan_tomorrow", payload, recompute_when_stale=True
+            )
             if existing:
                 return existing
 
@@ -5148,7 +5212,7 @@ class CyberHealthService:
             "method": method,
             "payload": payload,
         }
-        now_dt = datetime.now(UTC)
+        now_dt = self._utcnow()
         now = now_dt.isoformat()
         operation_id = f"op_{uuid.uuid4().hex}"
         intent_id = self._make_intent_id(user_id, idempotency_key)
@@ -5164,7 +5228,10 @@ class CyberHealthService:
 
         # Phase 1: Short transaction to reserve request & intent before any external IO
         with self.store.transaction() as conn:
-            existing = self._check_idempotency(conn, user_id, idempotency_key, "propose_memory_candidate", op_payload)
+            # Intent ids are derived from the key, so a memory key is never recycled.
+            existing = self._check_idempotency(
+                conn, user_id, idempotency_key, "propose_memory_candidate", op_payload, allow_key_reuse=False
+            )
             if existing:
                 return existing
 
@@ -5360,7 +5427,7 @@ class CyberHealthService:
 
         payload = {"action": "maintain_memory", "user_id": user_id, "prune_days": prune_days}
         owner_token = f"maint_{uuid.uuid4().hex[:12]}"
-        now_dt = datetime.now(UTC)
+        now_dt = self._utcnow()
         now = now_dt.isoformat()
         lease_until = (now_dt + timedelta(seconds=30)).isoformat()
         operation_id = f"op_{uuid.uuid4().hex}"
@@ -6055,7 +6122,7 @@ class CyberHealthService:
         start_day = end_day - timedelta(days=validated.window_days - 1)
         start_text = start_day.isoformat()
         end_text = end_day.isoformat()
-        now = datetime.now(UTC)
+        now = self._utcnow()
 
         with self.store.connect() as conn:
             profile = conn.execute(

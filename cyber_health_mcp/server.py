@@ -72,6 +72,11 @@ CYBER_HEALTH_HOST_INSTRUCTIONS = (
     "committed fact; say it was not saved unless the write tool returned status=success. On a timeout, aborted "
     "tool call, malformed response, or failed response, retry with the same idempotency key when safe or state "
     "plainly that the fact remains unrecorded. "
+    "Give every new fact or operation its own idempotency_key built from the tool, the local date and a random "
+    "suffix (for example log_meal-2026-10-07-3f9a1c2e); never use a generic label such as lunch-1 or meal, "
+    "because all sessions and hosts share one key space. Reuse a key only to retry the identical call. "
+    "IDEMPOTENCY_MISMATCH means the key already belongs to another request and nothing was written: if it is "
+    "a new fact retry with a fresh key, otherwise treat the fact as already recorded. "
     "When daily_review_readiness reports missing facts, and the host exposes session search/history, search "
     "other visible health-manager sessions rather than only the current nightly session. Use several terms such "
     "as breakfast, lunch, dinner, meal, workout, run, training, or rest; inspect matching history and use only "
@@ -647,7 +652,7 @@ def create_mcp_server(
                     user_id=user_id,
                     event_id=event_id,
                     action=action,
-                    idempotency_key=idempotency_key or f"ack_{uuid.uuid4().hex[:8]}",
+                    idempotency_key=idempotency_key or f"ack_{uuid.uuid4().hex}",
                 )
             except (CyberHealthError, ValueError) as err:
                 return _err_envelope(err, "acknowledge_schedule_event", user_id)

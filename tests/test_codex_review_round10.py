@@ -28,13 +28,14 @@ from cyber_health import (
     SafetyRestrictedError,
     ValidationError,
 )
+from test_support import fixed_clock
 
 
 class TestCodexReviewRound10(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "test_round10.sqlite3"
-        self.service = CyberHealthService(self.db_path, recovery_evidence_window_days=1)
+        self.service = CyberHealthService(self.db_path, recovery_evidence_window_days=1, clock=fixed_clock())
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
