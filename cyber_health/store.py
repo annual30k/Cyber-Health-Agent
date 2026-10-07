@@ -5,13 +5,17 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
 from .errors import StoreBusyError
 
 SINGLE_USER_ID = "owner"
+
+
+class SchemaVersionError(RuntimeError):
+    """The database was migrated by a newer Cyber Health release."""
 
 
 class ClosingConnection(sqlite3.Connection):
@@ -141,34 +145,26 @@ class SQLiteStore:
 
     @staticmethod
     def _apply_migrations(conn: sqlite3.Connection) -> None:
-        cursor = conn.execute("PRAGMA table_info(user_profile)")
-        profile_cols = {row["name"] for row in cursor.fetchall()}
-        if profile_cols:
-            if "safety_flags_json" not in profile_cols:
-                conn.execute("ALTER TABLE user_profile ADD COLUMN safety_flags_json TEXT NOT NULL DEFAULT '[]'")
-            if "safety_mode" not in profile_cols:
-                conn.execute("ALTER TABLE user_profile ADD COLUMN safety_mode TEXT NOT NULL DEFAULT 'normal'")
-            if "deload_until" not in profile_cols:
-                conn.execute("ALTER TABLE user_profile ADD COLUMN deload_until TEXT")
-
-        cursor = conn.execute("PRAGMA table_info(schedule_event)")
-        sched_cols = {row["name"] for row in cursor.fetchall()}
-        if sched_cols and "prompt_hint" not in sched_cols:
-            conn.execute("ALTER TABLE schedule_event ADD COLUMN prompt_hint TEXT")
-
-        cursor = conn.execute("PRAGMA table_info(memory_outbox)")
-        outbox_cols = {row["name"] for row in cursor.fetchall()}
-        if outbox_cols:
-            if "idempotency_key" not in outbox_cols:
-                conn.execute("ALTER TABLE memory_outbox ADD COLUMN idempotency_key TEXT")
-            if "request_hash" not in outbox_cols:
-                conn.execute("ALTER TABLE memory_outbox ADD COLUMN request_hash TEXT")
-            if "owner_token" not in outbox_cols:
-                conn.execute("ALTER TABLE memory_outbox ADD COLUMN owner_token TEXT")
-            if "lease_until" not in outbox_cols:
-                conn.execute("ALTER TABLE memory_outbox ADD COLUMN lease_until TEXT")
-            if "updated_at" not in outbox_cols:
-                conn.execute("ALTER TABLE memory_outbox ADD COLUMN updated_at TEXT")
+        """Run each pending migration once, in order, recording progress in ``PRAGMA user_version``."""
+        current = conn.execute("PRAGMA user_version").fetchone()[0]
+        if current > SCHEMA_VERSION:
+            raise SchemaVersionError(
+                f"Database schema version {current} is newer than this Cyber Health release supports "
+                f"({SCHEMA_VERSION}). Upgrade Cyber Health instead of opening the database with an older version."
+            )
+        for version, migrate in SCHEMA_MIGRATIONS:
+            if version <= current:
+                continue
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                # Another process may have migrated while this one waited for the lock.
+                if conn.execute("PRAGMA user_version").fetchone()[0] < version:
+                    migrate(conn)
+                    conn.execute(f"PRAGMA user_version = {int(version)}")
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
 
     @contextmanager
     def transaction(self, attempts: int = 3) -> Iterator[sqlite3.Connection]:
@@ -207,3 +203,44 @@ class SQLiteStore:
     @staticmethod
     def json(value: object) -> str:
         return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _migration_1_add_late_columns(conn: sqlite3.Connection) -> None:
+    """Columns added before schema versioning existed; each step is a no-op when present."""
+    cursor = conn.execute("PRAGMA table_info(user_profile)")
+    profile_cols = {row["name"] for row in cursor.fetchall()}
+    if profile_cols:
+        if "safety_flags_json" not in profile_cols:
+            conn.execute("ALTER TABLE user_profile ADD COLUMN safety_flags_json TEXT NOT NULL DEFAULT '[]'")
+        if "safety_mode" not in profile_cols:
+            conn.execute("ALTER TABLE user_profile ADD COLUMN safety_mode TEXT NOT NULL DEFAULT 'normal'")
+        if "deload_until" not in profile_cols:
+            conn.execute("ALTER TABLE user_profile ADD COLUMN deload_until TEXT")
+
+    cursor = conn.execute("PRAGMA table_info(schedule_event)")
+    sched_cols = {row["name"] for row in cursor.fetchall()}
+    if sched_cols and "prompt_hint" not in sched_cols:
+        conn.execute("ALTER TABLE schedule_event ADD COLUMN prompt_hint TEXT")
+
+    cursor = conn.execute("PRAGMA table_info(memory_outbox)")
+    outbox_cols = {row["name"] for row in cursor.fetchall()}
+    if outbox_cols:
+        if "idempotency_key" not in outbox_cols:
+            conn.execute("ALTER TABLE memory_outbox ADD COLUMN idempotency_key TEXT")
+        if "request_hash" not in outbox_cols:
+            conn.execute("ALTER TABLE memory_outbox ADD COLUMN request_hash TEXT")
+        if "owner_token" not in outbox_cols:
+            conn.execute("ALTER TABLE memory_outbox ADD COLUMN owner_token TEXT")
+        if "lease_until" not in outbox_cols:
+            conn.execute("ALTER TABLE memory_outbox ADD COLUMN lease_until TEXT")
+        if "updated_at" not in outbox_cols:
+            conn.execute("ALTER TABLE memory_outbox ADD COLUMN updated_at TEXT")
+
+
+# Ordered, append-only schema migrations. Never edit or renumber a released step;
+# add a new (version, function) pair instead. Fresh databases run every step too,
+# so each step must tolerate tables that ``initialize`` already created.
+SCHEMA_MIGRATIONS: tuple[tuple[int, Callable[[sqlite3.Connection], None]], ...] = (
+    (1, _migration_1_add_late_columns),
+)
+SCHEMA_VERSION = SCHEMA_MIGRATIONS[-1][0]
