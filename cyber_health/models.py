@@ -372,6 +372,30 @@ class CompleteWorkoutInput(BaseModel):
         return _check_real_date(v)
 
 
+class WeightTrendInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    date: str = Field(...)
+    window_days: int = Field(default=28, ge=7, le=180)
+
+    @field_validator("date")
+    @classmethod
+    def validate_date(cls, v: str) -> str:
+        return _check_real_date(v)
+
+
+class WeeklyReviewInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    date: str = Field(...)
+    days: int = Field(default=7, ge=7, le=31)
+
+    @field_validator("date")
+    @classmethod
+    def validate_date(cls, v: str) -> str:
+        return _check_real_date(v)
+
+
 class QueryKnowledgeInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

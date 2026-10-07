@@ -874,6 +874,43 @@ def create_mcp_server(
                 openWorldHint=False,
             )
         )
+        def cyber_health_get_weight_trend(date: str, window_days: int = 28) -> dict[str, Any]:
+            """Read-only weight trend (7-day average, weekly change) for the window ending on date.
+
+            Judges the trend against the goal type (fat loss, muscle gain, maintain) only with
+            enough weigh-ins; any calorie adjustment is a suggestion that needs the user's consent.
+            """
+            try:
+                return service.get_weight_trend(date=date, window_days=window_days)
+            except Exception as err:  # noqa: BLE001 - MCP tool boundary: every failure becomes an error envelope
+                return _err_envelope(err, "get_weight_trend")
+
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                readOnlyHint=True,
+                destructiveHint=False,
+                idempotentHint=True,
+                openWorldHint=False,
+            )
+        )
+        def cyber_health_weekly_review(date: str, days: int = 7) -> dict[str, Any]:
+            """Read-only review of the days ending on date: logging coverage, intake vs target,
+            protein days, workouts, sleep, weight trend and data gaps. Unrecorded days are
+            disclosed, never counted as zero intake or rest. Present data_gaps before conclusions.
+            """
+            try:
+                return service.weekly_review(date=date, days=days)
+            except Exception as err:  # noqa: BLE001 - MCP tool boundary: every failure becomes an error envelope
+                return _err_envelope(err, "weekly_review")
+
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                readOnlyHint=True,
+                destructiveHint=False,
+                idempotentHint=True,
+                openWorldHint=False,
+            )
+        )
         def cyber_health_query_knowledge(
             query: str,
             category: str | None = None,

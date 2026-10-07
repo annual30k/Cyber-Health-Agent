@@ -158,8 +158,10 @@ class TestMCPStdio(unittest.IsolatedAsyncioTestCase):
                 tool_names = [t.name for t in tools_res.tools]
                 tools_by_name = {t.name: t for t in tools_res.tools}
 
-                # Exactly 27 tools (7 P0 + 20 extended domain capabilities)
-                self.assertEqual(len(tool_names), 27)
+                # Exactly 29 tools (7 P0 + 22 extended domain capabilities)
+                self.assertEqual(len(tool_names), 29)
+                self.assertIn("cyber_health_weekly_review", tool_names)
+                self.assertIn("cyber_health_get_weight_trend", tool_names)
                 self.assertIn("cyber_health_log_daily_metrics", tool_names)
                 self.assertIn("cyber_health_delete_meal", tool_names)
                 self.assertIn("cyber_health_log_workout", tool_names)
@@ -310,7 +312,7 @@ class SingleUserMCPTests(unittest.TestCase):
     def test_all_tools_hide_user_id(self) -> None:
         server = create_mcp_server(self.db, allow_all_tools=True)
         tools = server._tool_manager.list_tools()
-        self.assertEqual(len(tools), 27)
+        self.assertEqual(len(tools), 29)
         for tool in tools:
             self.assertNotIn("user_id", tool.parameters.get("properties", {}), tool.name)
 
@@ -452,6 +454,7 @@ class CompactToolListingTests(unittest.TestCase):
             "cyber_health_get_profile": {}, "cyber_health_get_today": {"date": "2026-09-05"},
             "cyber_health_health_check": {}, "cyber_health_get_schedule": {"date": "2026-09-05"},
             "cyber_health_get_audit_trail": {}, "cyber_health_query_knowledge": {"query": "protein"},
+            "cyber_health_weekly_review": {"date": "2026-09-05"}, "cyber_health_get_weight_trend": {"date": "2026-09-05"},
             "cyber_health_log_meal": {"occurred_at": "2026-09-05T12:00:00+08:00", "meal_type": "lunch", "foods": [],
                                       "kcal_low": 1, "kcal_high": 2, "idempotency_key": "compact-1"},
             "cyber_health_log_meal_failure": None,

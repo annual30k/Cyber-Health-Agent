@@ -16,6 +16,7 @@ from .domain.knowledge import KnowledgeMixin
 from .domain.memory_ops import MemoryOpsMixin
 from .domain.nutrition import NutritionMixin
 from .domain.profile import ProfileMixin
+from .domain.progress import ProgressMixin
 from .domain.records import RecordsMixin
 from .domain.review import ReviewMixin
 from .domain.safety import SafetyRecoveryEvaluation
@@ -38,6 +39,7 @@ class CyberHealthService(
     TrainingRulesMixin,
     ScheduleMixin,
     ReviewMixin,
+    ProgressMixin,
     RecordsMixin,
     KnowledgeMixin,
     MemoryOpsMixin,

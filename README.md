@@ -5,7 +5,7 @@
 > **v0.5.0:** MCP tool arguments are unchanged. The Python `CyberHealthService` API no longer accepts `user_id` either, the service itself (not only the MCP server) refuses an unmigrated legacy database, and the SQLite schema version is now recorded in `PRAGMA user_version`, so a database opened by v0.5.0 must not be downgraded to an older release.
 
 > Independent, pluggable deterministic health engine and stdio MCP server for AI hosts (Codex, OpenClaw, Hermes, etc.). It is not an Obsidian plugin.
-> **Current Status**: Core P0 implementation and extended domain capabilities (27 tools total: 7 P0 + 20 extended), including first-run intake, nightly fact collection, target-gap analysis, host automation declarations, next-day plan generation, cross-session wearable screenshot retention, and read-only active-memory pattern suggestions.
+> **Current Status**: Core P0 implementation and extended domain capabilities (29 tools total: 7 P0 + 22 extended), including first-run intake, nightly fact collection, target-gap analysis, host automation declarations, next-day plan generation, cross-session wearable screenshot retention, and read-only active-memory pattern suggestions.
 
 > **Agent installation entry point**: For a normal user, follow the single
 > [Agent onboarding guide](docs/agent-onboarding.md). It defines the required confirmations,
@@ -29,7 +29,7 @@
 ```
 
 - **Host-Neutral & Headless**: AI hosts do not own health state. Health records are stored in SQLite facts tables with optimistic concurrency (`state_version`).
-- **Single-Person MCP Boundary (v0.4.2)**: The 27 MCP tools no longer accept `user_id`; all sessions and hosts on one installation use the internal `owner` identity. Existing databases with other identity partitions require an explicit, verified migration before the new server starts. The Core service API has no identity parameter either: every fact is stored under the fixed `owner` partition key, and a database that still holds other identities is refused by both the MCP server and the service until it is migrated.
+- **Single-Person MCP Boundary (v0.4.2)**: The MCP tools no longer accept `user_id`; all sessions and hosts on one installation use the internal `owner` identity. Existing databases with other identity partitions require an explicit, verified migration before the new server starts. The Core service API has no identity parameter either: every fact is stored under the fixed `owner` partition key, and a database that still holds other identities is refused by both the MCP server and the service until it is migrated.
 - **Strict Read-Only Purity & Consistent Snapshots**: `cyber_health_get_profile` and `cyber_health_get_today` are strictly pure snapshot queries and never insert or mutate database records. `get_today` uses explicit snapshot read transactions (`BEGIN` ... `COMMIT`).
 - **Idempotency & Concurrency**: All state-mutating operations strictly require a non-empty `idempotency_key`; hosts should make each key unique per fact (`<tool>-<local date>-<random suffix>`), because all sessions share one key space. Identical retries return the cached response; a different request with a key used in the last 24 hours raises `IDEMPOTENCY_MISMATCH` (nothing is written), while an older key is retired in the audit log and reused. `daily_review` and `plan_tomorrow` replay only while no other write has happened, so a date-stable key never returns a stale review. Stale writes raise `CONFLICT_VERSION`.
 - **Timezone Awareness & Real DST Calculations**: Meal times and daily records are converted to the user's timezone (`Asia/Shanghai` default) using standard IANA `zoneinfo`. Daily reminders calculate true local offsets dynamically (e.g. America/New_York `-04:00` / `-05:00`).
@@ -139,7 +139,7 @@ uv sync --python 3.12
 # 2. Run standard P0 stdio server (7 P0 tools, including profile onboarding)
 .venv/bin/cyber-health-mcp --db ./data/cyber-health.sqlite3
 
-# 3. Run extended server exposing all 27 verified domain tools
+# 3. Run extended server exposing all 29 verified domain tools
 .venv/bin/cyber-health-mcp --db ./data/cyber-health.sqlite3 --allow-all
 
 # 4. Dry-run host integration inspection & uninstallation report
@@ -289,7 +289,7 @@ installer does not modify another user's plugin configuration or Vault without e
 | Parameter / Flag | Environment Variable | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `--db <path>` | `CYBER_HEALTH_DB` | `./data/cyber-health.sqlite3` | Path to SQLite database file |
-| `--allow-all` | `CYBER_HEALTH_ALLOW_ALL_TOOLS` | `false` | When true, exposes all 20 extended domain tools (27 tools total); defaults to 7 P0 tools |
+| `--allow-all` | `CYBER_HEALTH_ALLOW_ALL_TOOLS` | `false` | When true, exposes all 22 extended domain tools (29 tools total); defaults to 7 P0 tools |
 
 #### Cyber Health Uninstaller (`cyber-health-uninstall`)
 | Parameter / Flag | Default | Description |
@@ -320,7 +320,7 @@ Hosts load the tool list into every session, so the server publishes a compact l
 | `cyber_health_health_check` | Read | **Completed** | SQLite status, MemoryProvider state, pending outbox work |
 | `cyber_health_get_schedule` | Read | **Completed** | Pure derived read returning dynamic eligibility, suppression reasons, and tombstones |
 
-### Extended Domain Tools (Enabled with `--allow-all` - 20 Additional Tools, 27 Total)
+### Extended Domain Tools (Enabled with `--allow-all` - 22 Additional Tools, 29 Total)
 
 | Tool Name | Status | Description |
 | :--- | :--- | :--- |
@@ -344,6 +344,8 @@ Hosts load the tool list into every session, so the server publishes a compact l
 | `cyber_health_update_schedule_event` | **Completed** | Scheduled event status, delivery, or postponed time window updates |
 | `cyber_health_query_memory` | **Completed** | Dual-layer memory query retrieving short-term SQLite facts and long-term Obsidian memories |
 | `cyber_health_get_memory_suggestions` | **Completed** | Read-only multi-day pattern detection that returns user-confirmation candidates without writing memory |
+| `cyber_health_get_weight_trend` | **Completed** | Read-only 7-day average and weekly weight change judged against the goal type (fat loss −0.5–1%/week, muscle gain +0.25–0.5%/week, maintain ±0.25%); calorie adjustments are suggestions that need user consent |
+| `cyber_health_weekly_review` | **Completed** | Read-only weekly review: logging coverage, intake vs target, protein days, workouts, sleep, weight trend and data gaps; unrecorded days are never counted as zero |
 
 ---
 
@@ -385,6 +387,7 @@ The suite contains **283 automated test cases**, organized by feature:
 - `tests/test_training_progression.py`: double progression, streak breakers, confirmation evidence and safety/recovery blocks.
 - `tests/test_schedule.py`: five reminder windows, eligibility suppression, postponement, tombstones, overdue compensation and read purity.
 - `tests/test_daily_review.py`: nightly fact collection, daily review, tomorrow's plan and maintenance hints.
+- `tests/test_progress.py`: weight trend classification against the goal, suggestion-only calorie adjustments, weekly review coverage and read purity.
 - `tests/test_import_export.py`: export/import round trip, schema and value validation, safety-profile protection and legacy-owner import.
 - `tests/test_knowledge.py`: evidence citations and non-diagnostic disclosures.
 
@@ -395,7 +398,7 @@ The suite contains **283 automated test cases**, organized by feature:
 - `tests/test_obsidian_memory_provider.py`: Obsidian provider bridge, inspector scope checks and note parsing.
 
 ### MCP server, storage and host integration
-- `tests/test_mcp_server.py`: stdio tool discovery (7 P0 vs 27 total), single-owner boundary, console entrypoint and error envelopes.
+- `tests/test_mcp_server.py`: stdio tool discovery (7 P0 vs 29 total), single-owner boundary, console entrypoint and error envelopes.
 - `tests/test_store_migrations.py` and `tests/test_migrate_owner.py`: versioned schema migrations and legacy-partition migration.
 - `tests/test_codex_registration.py` and `tests/test_hermes_registration.py`: isolated native MCP registration lifecycles, with optional real-CLI round trips.
 - `tests/test_installer.py`, `tests/test_updater.py`, `tests/test_uninstaller.py`, `tests/test_cli.py`: install/update/uninstall contracts, fail-closed ordering, purge safety and TOCTOU defenses.
