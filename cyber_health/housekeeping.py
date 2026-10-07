@@ -126,11 +126,12 @@ def housekeeping_report_lines(status: HousekeepingStatus) -> list[str]:
     def summary(items: list[str]) -> str:
         return f"{len(items)}" + (f" ({', '.join(items[:3])}{', ...' if len(items) > 3 else ''})" if items else "")
 
+    would = "would be " if status.dry_run else ""
     lines = [
         "--- Local Housekeeping ---",
-        f"Permissions  : {summary(status.permissions_tightened)} tightened",
-        f"Old backups  : {summary(status.backups_pruned)} pruned",
-        f"Temp files   : {summary(status.temp_files_removed)} removed",
+        f"Permissions  : {summary(status.permissions_tightened)} {would}tightened",
+        f"Old backups  : {summary(status.backups_pruned)} {would}pruned",
+        f"Temp files   : {summary(status.temp_files_removed)} {would}removed",
     ]
     if status.errors:
         lines.append(f"Errors       : {'; '.join(status.errors)}")

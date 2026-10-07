@@ -176,5 +176,63 @@ class TestCyberHealthCLI(unittest.TestCase):
                 self.assertEqual(get_default_db_path(), Path.cwd() / "data" / "cyber-health.sqlite3")
 
 
+class CleanupCommandTests(unittest.TestCase):
+    """`cyber-health cleanup` is offline housekeeping limited to a real installation."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.target = Path(tmp.name).resolve() / ".cyber-health"
+        self.backups = self.target / "data" / "backups"
+        self.backups.mkdir(parents=True)
+        (self.target / "config").mkdir()
+        (self.target / "config" / "installation.json").write_text("{}", encoding="utf-8")
+        for day in range(1, 13):
+            (self.backups / f"cyber-health-backup-202610{day:02d}_000000.sqlite3").write_bytes(b"b")
+        self.pre_migration = self.backups / "cyber-health-pre-owner-migration-20260918_145841.sqlite3"
+        self.pre_migration.write_bytes(b"keep")
+        offline = mock.patch("urllib.request.urlopen", side_effect=AssertionError("cleanup must not use the network"))
+        offline.start()
+        self.addCleanup(offline.stop)
+
+    def run_cli(self, *args: str) -> tuple[int, str]:
+        from cyber_health.cli import main
+
+        buf = io.StringIO()
+        with mock.patch("sys.stdout", buf):
+            code = main(["cleanup", "--target-dir", str(self.target), *args])
+        return code, buf.getvalue()
+
+    def rolling(self) -> list[str]:
+        return sorted(p.name for p in self.backups.glob("cyber-health-backup-*.sqlite3"))
+
+    def test_dry_run_reports_without_deleting(self) -> None:
+        code, out = self.run_cli("--dry-run", "--json")
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        self.assertEqual(len(report["backups_pruned"]), 2)
+        self.assertTrue(report["dry_run"])
+        self.assertEqual(len(self.rolling()), 12)
+
+    def test_keeps_newest_backups_and_the_pre_migration_snapshot(self) -> None:
+        code, out = self.run_cli("--keep-backups", "5")
+        self.assertEqual(code, 0)
+        self.assertIn("removed: cyber-health-backup-20261001_000000.sqlite3", out)
+        self.assertEqual(self.rolling(), [f"cyber-health-backup-202610{d:02d}_000000.sqlite3" for d in range(8, 13)])
+        self.assertTrue(self.pre_migration.exists())
+
+    def test_refuses_a_directory_that_is_not_an_installation(self) -> None:
+        (self.target / "config" / "installation.json").unlink()
+        code, out = self.run_cli("--json")
+        self.assertEqual(code, 1)
+        self.assertIn("not a Cyber Health installation", json.loads(out)["error"])
+        self.assertEqual(len(self.rolling()), 12)
+
+    def test_rejects_keeping_zero_backups(self) -> None:
+        code, _ = self.run_cli("--keep-backups", "0", "--json")
+        self.assertEqual(code, 1)
+        self.assertEqual(len(self.rolling()), 12)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4,7 +4,8 @@ Usage:
   cyber-health install [--target-dir DIR] [--db DB] [--dry-run] [--json]
   cyber-health update [--target-dir DIR] [--dry-run] [--json]
   cyber-health uninstall [--purge-data] [--confirm-purge TOKEN] [--dry-run] [--json]
-  cyber-health status [--target-dir DIR] [--json]
+  cyber-health status [--target-dir DIR] [--json] [--check-updates]
+  cyber-health cleanup [--target-dir DIR] [--keep-backups N] [--dry-run] [--json]
   cyber-health mcp [--db DB] [--allow-all]
 """
 
@@ -22,6 +23,7 @@ from typing import Any
 from .codex_integration import find_codex_cli, inspect_codex_registration
 from .health_memory import HealthManagerMemoryStatus, inspect_health_manager_memory
 from .hermes_integration import find_hermes_cli, inspect_hermes_registration
+from .housekeeping import DEFAULT_BACKUP_RETENTION, housekeeping_report_lines, run_housekeeping
 from .install import (
     DEFAULT_INSTALL_DIR_NAME,
     FIXED_OPENCLAW_SERVER_NAME,
@@ -30,6 +32,34 @@ from .install import (
     verify_sqlite_integrity,
 )
 from .uninstall import verify_cyber_health_command_signature
+
+
+def run_cleanup(target_dir_str: str | None, *, keep_backups: int, dry_run: bool, as_json: bool) -> int:
+    """Offline housekeeping: private permissions, backup retention, temp leftovers. Never contacts GitHub."""
+    target_dir = Path(target_dir_str) if target_dir_str else Path.home() / DEFAULT_INSTALL_DIR_NAME
+    problem = None
+    if keep_backups < 1:
+        problem = "--keep-backups must be at least 1"
+    elif target_dir.is_symlink() or not (target_dir / "config" / "installation.json").is_file():
+        # Only an actual installation is touched: never chmod or prune an arbitrary directory.
+        problem = f"{target_dir} is not a Cyber Health installation (config/installation.json missing)"
+    if problem:
+        if as_json:
+            print(json.dumps({"success": False, "error": problem}, indent=2))
+        else:
+            print(f"Error: {problem}", file=sys.stderr)
+        return 1
+
+    status = run_housekeeping(target_dir, keep_backups=keep_backups, dry_run=dry_run)
+    if as_json:
+        print(json.dumps({"success": not status.errors, "target_dir": str(target_dir), "keep_backups": keep_backups,
+                          **status.__dict__}, indent=2))
+    else:
+        print(f"Cyber Health cleanup ({'DRY RUN' if dry_run else 'EXECUTE'}) - {target_dir}")
+        print("\n".join(housekeeping_report_lines(status)))
+        for name in status.backups_pruned:
+            print(f"  {'would remove' if dry_run else 'removed'}: {name}")
+    return 1 if status.errors else 0
 
 
 def run_status(target_dir_str: str | None, as_json: bool = False, check_updates: bool = False) -> int:
@@ -250,6 +280,15 @@ def main(argv: list[str] | None = None) -> int:
     status_parser.add_argument("--json", action="store_true")
     status_parser.add_argument("--check-updates", action="store_true", help="Also ask GitHub for the latest stable Release")
 
+    # cleanup
+    cleanup_parser = subparsers.add_parser(
+        "cleanup", help="Local housekeeping without network access: permissions, backup retention, temp files"
+    )
+    cleanup_parser.add_argument("--target-dir", type=str, default=None)
+    cleanup_parser.add_argument("--keep-backups", type=int, default=DEFAULT_BACKUP_RETENTION)
+    cleanup_parser.add_argument("--dry-run", action="store_true")
+    cleanup_parser.add_argument("--json", action="store_true")
+
     # mcp
     mcp_parser = subparsers.add_parser("mcp", help="Run the Cyber Health stdio MCP server directly")
     mcp_parser.add_argument("--db", dest="db_path", type=str, default=None)
@@ -279,6 +318,8 @@ def main(argv: list[str] | None = None) -> int:
         return uninstall_main(argv[1:])
     elif args.command == "status":
         return run_status(args.target_dir, as_json=args.json, check_updates=args.check_updates)
+    elif args.command == "cleanup":
+        return run_cleanup(args.target_dir, keep_backups=args.keep_backups, dry_run=args.dry_run, as_json=args.json)
     elif args.command == "migrate-owner":
         from .migrate import MigrationError, migrate_database_to_owner
         target_db = args.db or os.getenv("CYBER_HEALTH_DB") or str(Path.home() / DEFAULT_INSTALL_DIR_NAME / "data" / "cyber-health.sqlite3")
