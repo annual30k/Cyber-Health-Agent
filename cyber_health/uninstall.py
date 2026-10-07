@@ -28,6 +28,7 @@ from .codex_integration import (
     inspect_codex_registration,
     remove_codex_registration,
 )
+from .command_shim import CommandShimStatus, command_shim_report_lines, remove_command_shim
 from .hermes_integration import (
     HermesRegistrationStatus,
     find_hermes_cli,
@@ -155,6 +156,7 @@ class UninstallReport:
     hermes: HermesRegistrationStatus
     launchagent: HostIntegrationStatus
     data: DataPreservationStatus
+    command_shim: CommandShimStatus = field(default_factory=CommandShimStatus)
     protected_boundaries: dict[str, bool] = field(
         default_factory=lambda: {
             "obsidian_memory_preserved": True,
@@ -189,6 +191,7 @@ class CyberHealthUninstaller:
         dry_run: bool = False,
         purge_data: bool = False,
         confirm_purge: str | None = None,
+        user_bin_dir: Path | str | None = None,
     ):
         # Raw paths preserved for symlink checking
         if project_root is not None:
@@ -252,6 +255,7 @@ class CyberHealthUninstaller:
         self.force_foreign_host_mcp = force_foreign_host_mcp
         self.confirm_foreign_unset = confirm_foreign_unset
         self.dry_run = dry_run
+        self.user_bin_dir = Path(user_bin_dir) if user_bin_dir is not None else None
         self.purge_data = purge_data
         self.confirm_purge = confirm_purge
         self.installed_root = (Path.home() / DEFAULT_INSTALL_DIR_NAME).resolve()
@@ -947,6 +951,14 @@ class CyberHealthUninstaller:
                     )
 
     def run(self) -> UninstallReport:
+        report = self._run()
+        if report.success:
+            report.command_shim = remove_command_shim(self.project_root, bin_dir=self.user_bin_dir, dry_run=self.dry_run)
+        else:
+            report.command_shim = CommandShimStatus(action="skipped", reason="Uninstallation did not complete.")
+        return report
+
+    def _run(self) -> UninstallReport:
         # Phase 1: Planning and inspection (strictly read-only)
         openclaw_status = self.inspect_openclaw()
         codex_status = self.inspect_codex()
@@ -1158,6 +1170,7 @@ def format_text_report(report: UninstallReport) -> str:
 
     lines.extend([
         "",
+        *command_shim_report_lines(report.command_shim),
         "--- Protected Boundaries ---",
         "  + obsidian-memory: STRICTLY PRESERVED (Not a Cyber Health component)",
         "  + Obsidian Vaults: STRICTLY PRESERVED (Untouched)",

@@ -85,7 +85,16 @@ Compare the displayed hash against `SHA256SUMS`; stop if they differ. Review the
 
 Long-term memory is optional. Only after the user explicitly opts in, has Obsidian installed, and chooses an absolute Vault path, repeat the dry-run and install commands with `--memory-vault "/absolute/path/to/Vault"` (PowerShell: quote the Windows absolute path). OpenClaw's public `obsidian-memory-plugin` is fetched from its verified Release when needed; for Codex or Hermes, install that [independent plugin](https://github.com/annual30k/obsidian-memory-plugin) by its host instructions. Without opt-in, health facts still remain in local SQLite; do not claim Obsidian memory is connected. For the complete consent and failure flow, see the [agent onboarding guide](docs/agent-onboarding.md).
 
+Install and update also link the `cyber-health` command into `~/.local/bin` (Windows: a `cyber-health.cmd` shim in `%USERPROFILE%\.local\bin`; override with `CYBER_HEALTH_USER_BIN_DIR`). An existing file there that Cyber Health did not create is left untouched, shell startup files are never edited, and when the directory is not on PATH the report prints the line to add. Uninstall removes only its own link.
+
 After installation, use the installed `cyber-health update --dry-run --json` and then `cyber-health update --json` to upgrade. For a pre-v0.4.2 database, first complete the backup and identity migration described above. The installer does not silently update at startup.
+
+Update behavior (v0.5.1+):
+
+- `cyber-health update --check` (or `cyber-health status --check-updates`) only reports whether a newer stable Release exists; nothing is changed. Plain `status` never contacts GitHub.
+- When the installed version is already the latest Release, `update` exits immediately without a backup or reinstall; `--force` reinstalls and re-verifies anyway.
+- After installing a new version, the updater hands the remaining steps (schema verification, host registration checks, metadata) to the newly installed code, so new behavior applies in the same run. If the new version cannot finish, the previous updater completes the verification and says so.
+- Every successful install/update makes the installation private to the current user (directories `0700`, data files `0600`), keeps the newest 10 rolling update backups (`--keep-backups N`; pre-migration backups are never pruned), and removes orphaned temporary migration files.
 
 When installing Cyber Health for Codex, OpenClaw, or Hermes, the required installation entry point is
 `cyber-health install`. Agents must not replace this with only `pip install`, `uv sync`,

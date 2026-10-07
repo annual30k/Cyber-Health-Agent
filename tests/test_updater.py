@@ -7,18 +7,22 @@ and update workflow in isolated test fixtures.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from cyber_health.core_release import CoreRelease
+from cyber_health.command_shim import _shim_path, _target_path
+from cyber_health.core_release import CoreRelease, CoreReleaseError
 from cyber_health.install import compute_sha256, get_executable_name, get_venv_bin_dir, verify_sqlite_integrity
-from cyber_health.memory_plugin_release import MemoryPluginRelease
+from cyber_health.memory_plugin_release import MemoryPluginRelease, MemoryPluginReleaseStatus
 from cyber_health.update import (
+    BackupStatus,
     CyberHealthUpdater,
     UpdateBackupError,
+    UpdateReport,
     main,
 )
 from test_support import isolate_host_clis
@@ -374,6 +378,134 @@ class TestCyberHealthUpdater(BaseUpdaterFixture):
             self.assertTrue(updater.verify_openclaw())
             # Exactly 1 call (show), no set needed
             self.assertEqual(mock_run.call_count, 1)
+
+
+class TestUpdateLinksCommand(BaseUpdaterFixture):
+    """An update gives older installations the `cyber-health` PATH entry."""
+
+    def report(self, success: bool) -> UpdateReport:
+        return UpdateReport(
+            dry_run=False, success=success, target_dir=str(self.target_dir), old_version="0.4.2",
+            new_version="0.5.0", backup=BackupStatus(source_db=str(self.target_db)), message="done",
+        )
+
+    def test_successful_update_links_the_command(self) -> None:
+        _target_path(get_venv_bin_dir(self.venv_dir)).write_text("", encoding="utf-8")
+        updater = CyberHealthUpdater(project_root=self.source_root, target_dir=self.target_dir, dry_run=False)
+        with mock.patch.object(CyberHealthUpdater, "_run", return_value=self.report(True)):
+            report = updater.run()
+        self.assertEqual(report.command_shim.action, "linked")
+        self.assertTrue(_shim_path(Path(os.environ["CYBER_HEALTH_USER_BIN_DIR"])).exists())
+
+    def test_failed_update_leaves_path_alone(self) -> None:
+        updater = CyberHealthUpdater(project_root=self.source_root, target_dir=self.target_dir, dry_run=False)
+        with mock.patch.object(CyberHealthUpdater, "_run", return_value=self.report(False)):
+            report = updater.run()
+        self.assertEqual(report.command_shim.action, "skipped")
+        self.assertFalse(Path(os.environ["CYBER_HEALTH_USER_BIN_DIR"]).exists())
+
+
+class TestUpdateLifecycleImprovements(BaseUpdaterFixture):
+    """Up-to-date short-circuit, --check, hand-off to the new version, private backups."""
+
+    def release(self, version: str) -> CoreRelease:
+        return CoreRelease(
+            version, f"cyber_health_agent-{version}-py3-none-any.whl",
+            f"https://github.com/annual30k/cyber-health-agent/releases/download/v{version}/w.whl", "a" * 64,
+            f"https://github.com/annual30k/cyber-health-agent/releases/tag/v{version}",
+        )
+
+    def updater(self, version: str = "0.2.4", **kwargs) -> CyberHealthUpdater:
+        return CyberHealthUpdater(
+            target_dir=self.target_dir, openclaw_bin=None, codex_bin=None, hermes_bin=None,
+            core_release_resolver=lambda: self.release(version), **kwargs,
+        )
+
+    def test_already_latest_skips_backup_and_reinstall(self) -> None:
+        updater = self.updater("0.2.4")
+        with mock.patch.object(CyberHealthUpdater, "upgrade_package") as upgrade:
+            report = updater.run()
+        self.assertTrue(report.success)
+        self.assertTrue(report.up_to_date)
+        self.assertFalse(report.backup.created)
+        upgrade.assert_not_called()
+        self.assertEqual(list(self.backups_dir.iterdir()), [])
+        self.assertIn("Already up to date", report.message)
+
+    def test_force_reinstalls_even_when_latest(self) -> None:
+        updater = self.updater("0.2.4", force=True)
+        with mock.patch.object(CyberHealthUpdater, "upgrade_package", return_value=True) as upgrade, \
+                mock.patch.object(CyberHealthUpdater, "should_hand_off", return_value=False), \
+                mock.patch.object(CyberHealthUpdater, "update_memory_plugin", return_value=MemoryPluginReleaseStatus()):
+            report = updater.run()
+        upgrade.assert_called_once()
+        self.assertFalse(report.up_to_date)
+        self.assertTrue(report.backup.created)
+
+    def test_check_reports_available_update_without_mutation(self) -> None:
+        result = self.updater("0.9.0").check_for_update()
+        self.assertEqual((result["installed_version"], result["latest_version"]), ("0.2.4", "0.9.0"))
+        self.assertTrue(result["update_available"])
+        self.assertFalse(self.updater("0.2.4").check_for_update()["update_available"])
+        self.assertEqual(list(self.backups_dir.iterdir()), [])
+
+    def test_check_reports_resolver_errors(self) -> None:
+        def broken():
+            raise CoreReleaseError("offline")
+        updater = CyberHealthUpdater(target_dir=self.target_dir, openclaw_bin=None, codex_bin=None, hermes_bin=None,
+                                     core_release_resolver=broken)
+        result = updater.check_for_update()
+        self.assertIsNone(result["update_available"])
+        self.assertIn("offline", result["error"])
+
+    def test_new_version_finishes_its_own_upgrade(self) -> None:
+        updater = self.updater("9.9.9", dry_run=False)
+        child = {"dry_run": False, "success": True, "target_dir": str(self.target_dir), "old_version": "0.2.4",
+                 "new_version": "9.9.9", "backup": {"created": True}, "finished_by": "9.9.9",
+                 "future_field": "ignored", "message": "Update completed successfully"}
+        completed = mock.MagicMock(returncode=0, stdout=json.dumps(child), stderr="")
+        with mock.patch("cyber_health.update.subprocess.run", return_value=completed) as run:
+            report = updater.hand_off("0.2.4", BackupStatus(created=True), True)
+        cmd = run.call_args.args[0]
+        self.assertIn("--finish-upgrade", cmd)
+        self.assertEqual(cmd[1:4], ["-P", "-m", "cyber_health.update"])
+        self.assertEqual(run.call_args.kwargs["cwd"], str(self.target_dir))
+        self.assertTrue(report.handed_off)
+        self.assertEqual(report.finished_by, "9.9.9")
+        self.assertFalse((self.config_dir / "update-handoff.json").exists())
+
+    def test_hand_off_falls_back_when_new_version_cannot_finish(self) -> None:
+        updater = self.updater("9.9.9", dry_run=False)
+        broken = mock.MagicMock(returncode=2, stdout="", stderr="unrecognized arguments: --finish-upgrade")
+        with mock.patch("cyber_health.update.subprocess.run", return_value=broken):
+            self.assertIsNone(updater.hand_off("0.2.4", BackupStatus(created=True), True))
+
+    def test_finish_upgrade_entry_runs_post_update_steps(self) -> None:
+        handoff = self.config_dir / "handoff.json"
+        handoff.write_text(json.dumps({"old_version": "0.2.4", "new_version": "9.9.9", "backup": {"created": True},
+                                       "core_release": {"action": "downloaded"}, "package_updated": True}), encoding="utf-8")
+        updater = self.updater("9.9.9", dry_run=False)
+        finished = UpdateReport(dry_run=False, success=True, target_dir=str(self.target_dir), old_version="0.2.4",
+                                new_version="9.9.9", backup=BackupStatus(created=True), message="done")
+        with mock.patch.object(CyberHealthUpdater, "_finish", return_value=finished) as finish:
+            report = updater.run_finish(handoff)
+        self.assertEqual(finish.call_args.args[1], "0.2.4")
+        self.assertTrue(report.success)
+        self.assertNotEqual(report.command_shim.action, "none")
+
+    def test_should_hand_off_only_for_a_real_version_change(self) -> None:
+        updater = self.updater("9.9.9", dry_run=False)
+        updater.prepare_core_release()
+        self.assertTrue(updater.should_hand_off(True))
+        self.assertFalse(updater.should_hand_off(False))
+        self.assertFalse(self.updater("9.9.9", dry_run=True).should_hand_off(True))
+        with mock.patch.dict(os.environ, {"CYBER_HEALTH_NO_HANDOFF": "1"}):
+            self.assertFalse(updater.should_hand_off(True))
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits")
+    def test_backup_snapshot_is_private(self) -> None:
+        status = self.updater(dry_run=False).create_database_snapshot()
+        self.assertEqual(os.stat(status.backup_file).st_mode & 0o777, 0o600)
 
 
 if __name__ == "__main__":

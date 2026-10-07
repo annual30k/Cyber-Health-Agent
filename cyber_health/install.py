@@ -27,6 +27,7 @@ from .codex_integration import (
     find_codex_cli,
     plan_codex_registration,
 )
+from .command_shim import CommandShimStatus, command_shim_note, command_shim_report_lines, ensure_command_shim
 from .core_release import CoreReleaseError, CoreReleaseStatus, cache_core_release, resolve_latest_core_release
 from .health_memory import HealthManagerMemoryStatus, inspect_health_manager_memory
 from .hermes_integration import (
@@ -35,6 +36,7 @@ from .hermes_integration import (
     find_hermes_cli,
     plan_hermes_registration,
 )
+from .housekeeping import HousekeepingStatus, housekeeping_report_lines, run_housekeeping
 from .memory_bootstrap import MemoryBootstrapper, MemoryBootstrapStatus
 from .memory_plugin_release import (
     MemoryPluginReleaseError,
@@ -263,6 +265,8 @@ class InstallReport:
     memory_plugin: MemoryPluginReleaseStatus = field(default_factory=MemoryPluginReleaseStatus)
     memory: HealthManagerMemoryStatus = field(default_factory=HealthManagerMemoryStatus)
     memory_bootstrap: MemoryBootstrapStatus = field(default_factory=MemoryBootstrapStatus)
+    command_shim: CommandShimStatus = field(default_factory=CommandShimStatus)
+    housekeeping: HousekeepingStatus = field(default_factory=HousekeepingStatus)
     message: str = ""
     protected_boundaries: dict[str, bool] = field(
         default_factory=lambda: {
@@ -298,6 +302,7 @@ class CyberHealthInstaller:
         skip_hermes: bool = False,
         memory_plugin_release_resolver=resolve_latest_memory_plugin_release,
         core_release_resolver=resolve_latest_core_release,
+        user_bin_dir: Path | str | None = None,
     ):
         # Resolve source project root
         self.release_mode = project_root is None
@@ -366,6 +371,7 @@ class CyberHealthInstaller:
         self.hermes_home = Path(hermes_home) if hermes_home else None
 
         self.dry_run = dry_run
+        self.user_bin_dir = Path(user_bin_dir) if user_bin_dir is not None else None
         self.use_uv = use_uv
         self.editable = editable
         self.skip_openclaw = skip_openclaw
@@ -1020,6 +1026,26 @@ class CyberHealthInstaller:
             return None
 
     def run(self) -> InstallReport:
+        report = self._run()
+        report.command_shim = self.expose_command(report.success)
+        if report.success:
+            report.housekeeping = run_housekeeping(self.target_dir, dry_run=self.dry_run)
+        notes = [command_shim_note(report.command_shim)]
+        if report.housekeeping.errors:
+            notes.append(f"Housekeeping issues: {'; '.join(report.housekeeping.errors)}")
+        for note in filter(None, notes):
+            report.message = f"{report.message}. {note}"
+        return report
+
+    def expose_command(self, installed: bool) -> CommandShimStatus:
+        """Put ``cyber-health`` on PATH so ``cyber-health update`` works without a full path."""
+        if not installed:
+            return CommandShimStatus(action="skipped", reason="Installation did not complete.")
+        return ensure_command_shim(
+            self.target_dir, get_venv_bin_dir(self.venv_dir), bin_dir=self.user_bin_dir, dry_run=self.dry_run
+        )
+
+    def _run(self) -> InstallReport:
         # Phase 1: Planning and inspection, including safe source WAL normalization.
         data_plan = self.plan_data_migration()
         self.core_release_status = self.prepare_core_release()
@@ -1325,6 +1351,8 @@ def format_text_report(report: InstallReport) -> str:
         f"Executed     : {report.memory_bootstrap.executed}",
         f"Reason       : {report.memory_bootstrap.reason}",
         "",
+        *command_shim_report_lines(report.command_shim),
+        *housekeeping_report_lines(report.housekeeping),
         "--- Protected Boundaries ---",
         "  + obsidian-memory: STRICTLY PRESERVED (Untouched)",
         "  + Obsidian Vaults: STRICTLY PRESERVED (Untouched)",

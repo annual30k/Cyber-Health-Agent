@@ -43,7 +43,7 @@ def make_python_command(directory: Path, name: str, script: str) -> Path:
 
 
 def isolate_host_clis(test: unittest.TestCase, home: Path, *modules: str) -> None:
-    """Hide the developer's real Codex/Hermes CLIs and config homes from a test.
+    """Hide the developer's real Codex/Hermes CLIs, config homes and user bin dir from a test.
 
     Auto-discovery in the given ``cyber_health`` modules returns ``None`` and
     ``CODEX_HOME``/``HERMES_HOME`` point into ``home``, so a test that does not pass
@@ -51,7 +51,11 @@ def isolate_host_clis(test: unittest.TestCase, home: Path, *modules: str) -> Non
     """
     env = mock.patch.dict(
         os.environ,
-        {"CODEX_HOME": str(home / "codex-home"), "HERMES_HOME": str(home / "hermes-home")},
+        {
+            "CODEX_HOME": str(home / "codex-home"),
+            "HERMES_HOME": str(home / "hermes-home"),
+            "CYBER_HEALTH_USER_BIN_DIR": str(home / "user-bin"),
+        },
     )
     env.start()
     test.addCleanup(env.stop)

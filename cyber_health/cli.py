@@ -32,7 +32,7 @@ from .install import (
 from .uninstall import verify_cyber_health_command_signature
 
 
-def run_status(target_dir_str: str | None, as_json: bool = False) -> int:
+def run_status(target_dir_str: str | None, as_json: bool = False, check_updates: bool = False) -> int:
     target_dir = Path(target_dir_str) if target_dir_str else Path.home() / DEFAULT_INSTALL_DIR_NAME
     config_file = target_dir / "config" / "installation.json"
     db_file = target_dir / "data" / "cyber-health.sqlite3"
@@ -141,6 +141,11 @@ def run_status(target_dir_str: str | None, as_json: bool = False) -> int:
             "reason": hermes_status.reason,
         }
 
+    if check_updates:
+        from .update import check_core_update
+
+        status_data["latest_release"] = check_core_update(str(status_data["version"]))
+
     if as_json:
         print(json.dumps(status_data, indent=2))
     else:
@@ -150,6 +155,14 @@ def run_status(target_dir_str: str | None, as_json: bool = False) -> int:
         print(f"Installed           : {'YES' if status_data['installed'] else 'NO'}")
         print(f"Target Directory    : {status_data['target_dir']}")
         print(f"Version             : {status_data['version']}")
+        latest = status_data.get("latest_release")
+        if latest:
+            if latest["error"]:
+                print(f"Latest Release      : unknown ({latest['error']})")
+            elif latest["update_available"]:
+                print(f"Latest Release      : {latest['latest_version']} available - run: cyber-health update")
+            else:
+                print("Latest Release      : up to date")
         print(f"Installed At        : {status_data['installed_at'] or 'N/A'}")
         print(f"Python Runtime      : {'Ready' if status_data['venv_ready'] else 'Missing'}")
         print(f"Database Exists     : {status_data['database']['exists']}")
@@ -235,6 +248,7 @@ def main(argv: list[str] | None = None) -> int:
     status_parser = subparsers.add_parser("status", help="Show Cyber Health Agent installation and database status")
     status_parser.add_argument("--target-dir", type=str, default=None)
     status_parser.add_argument("--json", action="store_true")
+    status_parser.add_argument("--check-updates", action="store_true", help="Also ask GitHub for the latest stable Release")
 
     # mcp
     mcp_parser = subparsers.add_parser("mcp", help="Run the Cyber Health stdio MCP server directly")
@@ -264,7 +278,7 @@ def main(argv: list[str] | None = None) -> int:
         from .uninstall import main as uninstall_main
         return uninstall_main(argv[1:])
     elif args.command == "status":
-        return run_status(args.target_dir, as_json=args.json)
+        return run_status(args.target_dir, as_json=args.json, check_updates=args.check_updates)
     elif args.command == "migrate-owner":
         from .migrate import MigrationError, migrate_database_to_owner
         target_db = args.db or os.getenv("CYBER_HEALTH_DB") or str(Path.home() / DEFAULT_INSTALL_DIR_NAME / "data" / "cyber-health.sqlite3")

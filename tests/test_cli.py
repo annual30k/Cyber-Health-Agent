@@ -61,6 +61,25 @@ class TestCyberHealthCLI(unittest.TestCase):
         self.assertTrue(data["installed"])
         self.assertEqual(data["version"], "0.2.4")
 
+    def test_status_checks_github_only_when_asked(self) -> None:
+        self.target_dir.mkdir()
+        (self.target_dir / "config").mkdir()
+        (self.target_dir / "config" / "installation.json").write_text(json.dumps({"version": "0.5.0"}))
+        latest = {"installed_version": "0.5.0", "latest_version": "0.5.1", "update_available": True,
+                  "release_url": "https://example.invalid", "error": None}
+        with mock.patch("cyber_health.update.check_core_update", return_value=latest) as check:
+            buf = io.StringIO()
+            with mock.patch("sys.stdout", buf):
+                run_status(str(self.target_dir), as_json=True)
+            self.assertNotIn("latest_release", json.loads(buf.getvalue()))
+            check.assert_not_called()
+
+            buf = io.StringIO()
+            with mock.patch("sys.stdout", buf):
+                run_status(str(self.target_dir), as_json=True, check_updates=True)
+        check.assert_called_once_with("0.5.0")
+        self.assertEqual(json.loads(buf.getvalue())["latest_release"]["latest_version"], "0.5.1")
+
     def test_run_status_does_not_claim_foreign_openclaw_registration(self) -> None:
         buf = io.StringIO()
         result = mock.MagicMock(returncode=0, stdout=json.dumps({

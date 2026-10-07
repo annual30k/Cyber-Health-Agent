@@ -8,6 +8,7 @@ Obsidian Vaults, or unrelated configurations.
 from __future__ import annotations
 
 import json
+import os
 import plistlib
 import tempfile
 import unittest
@@ -15,6 +16,8 @@ from dataclasses import asdict
 from pathlib import Path
 from unittest import mock
 
+from cyber_health.command_shim import _shim_path, _target_path, ensure_command_shim
+from cyber_health.install import get_venv_bin_dir
 from cyber_health.uninstall import (
     DEFAULT_LAUNCHAGENT_LABEL,
     FIXED_OPENCLAW_SERVER_NAME,
@@ -1135,6 +1138,45 @@ class TestUninstallerDefaultRoot(unittest.TestCase):
                 uninstaller = CyberHealthUninstaller(project_root=None)
                 self.assertEqual(uninstaller.project_root, fake_install)
                 self.assertEqual(uninstaller.db_path, fake_install / "data" / "cyber-health.sqlite3")
+
+
+class TestCommandLinkRemoval(BaseFakeHostTest):
+    """Uninstalling removes only the `cyber-health` link that points into this installation."""
+
+    def uninstaller(self, *, dry_run: bool) -> CyberHealthUninstaller:
+        return CyberHealthUninstaller(
+            project_root=self.project_root,
+            db_path=self.db_path,
+            openclaw_bin=str(self.fake_openclaw_bin),
+            launchagent_dir=self.launchagent_dir,
+            dry_run=dry_run,
+        )
+
+    def user_bin(self) -> Path:
+        return Path(os.environ["CYBER_HEALTH_USER_BIN_DIR"])
+
+    def test_owned_link_is_removed(self) -> None:
+        venv_bin = get_venv_bin_dir(self.project_root / ".venv")
+        venv_bin.mkdir(parents=True, exist_ok=True)
+        _target_path(venv_bin).write_text("", encoding="utf-8")
+        self.assertEqual(ensure_command_shim(self.project_root, venv_bin, bin_dir=self.user_bin()).action, "linked")
+
+        dry = self.uninstaller(dry_run=True).run()
+        self.assertEqual(dry.command_shim.action, "planned")
+        self.assertTrue(_shim_path(self.user_bin()).exists())
+
+        report = self.uninstaller(dry_run=False).run()
+        self.assertTrue(report.success)
+        self.assertEqual(report.command_shim.action, "removed")
+        self.assertFalse(_shim_path(self.user_bin()).exists())
+
+    def test_foreign_command_is_left_untouched(self) -> None:
+        self.user_bin().mkdir(parents=True)
+        _shim_path(self.user_bin()).write_text("foreign\n", encoding="utf-8")
+        report = self.uninstaller(dry_run=False).run()
+        self.assertTrue(report.success)
+        self.assertEqual(report.command_shim.action, "refused")
+        self.assertEqual(_shim_path(self.user_bin()).read_text(encoding="utf-8"), "foreign\n")
 
 
 if __name__ == "__main__":

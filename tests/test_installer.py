@@ -14,12 +14,15 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from cyber_health.command_shim import _shim_path, _target_path
 from cyber_health.core_release import CoreRelease
 from cyber_health.install import (
     CyberHealthInstaller,
     DataMigrationError,
+    InstallReport,
     SafetyBoundaryError,
     compute_sha256,
+    get_venv_bin_dir,
     main,
     verify_sqlite_integrity,
 )
@@ -583,6 +586,62 @@ class TestCyberHealthInstaller(BaseInstallerFixture):
             content = cmd_file.read_text(encoding="utf-8")
             self.assertIn("@echo off", content)
             self.assertIn("cyber-health-mcp.exe", content)
+
+
+class TestCommandOnPath(BaseInstallerFixture):
+    """Installing exposes `cyber-health` so `cyber-health update` works without a full path."""
+
+    def installer(self, *, dry_run: bool) -> CyberHealthInstaller:
+        return CyberHealthInstaller(
+            project_root=self.source_root,
+            target_dir=self.target_dir,
+            openclaw_bin=None,
+            codex_bin=None,
+            hermes_bin=None,
+            dry_run=dry_run,
+        )
+
+    def user_shim(self) -> Path:
+        return _shim_path(Path(os.environ["CYBER_HEALTH_USER_BIN_DIR"]))
+
+    def test_successful_install_links_the_command(self) -> None:
+        installer = self.installer(dry_run=False)
+        venv_bin = get_venv_bin_dir(installer.venv_dir)
+        venv_bin.mkdir(parents=True)
+        _target_path(venv_bin).write_text("", encoding="utf-8")
+        status = installer.expose_command(True)
+        self.assertEqual(status.action, "linked")
+        self.assertTrue(self.user_shim().exists())
+
+    def test_failed_install_leaves_path_alone(self) -> None:
+        status = self.installer(dry_run=False).expose_command(False)
+        self.assertEqual(status.action, "skipped")
+        self.assertFalse(self.user_shim().parent.exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits")
+    def test_successful_install_makes_the_tree_private(self) -> None:
+        installer = self.installer(dry_run=False)
+        installer.target_dir.mkdir(parents=True, exist_ok=True)
+        installer.target_dir.chmod(0o755)
+        done = InstallReport(
+            dry_run=False, success=True, version="0.5.1", source_project_root="", target_dir="", venv_dir="",
+            data=None, openclaw=None, message="Installation completed successfully",
+        )
+        with mock.patch.object(CyberHealthInstaller, "_run", return_value=done):
+            report = installer.run()
+        self.assertIn(str(installer.target_dir), report.housekeeping.permissions_tightened)
+        self.assertEqual(installer.target_dir.stat().st_mode & 0o777, 0o700)
+
+    def test_dry_run_report_plans_the_command_without_writing(self) -> None:
+        installer = self.installer(dry_run=True)
+        planned = InstallReport(
+            dry_run=True, success=True, version="0.5.0", source_project_root="", target_dir="", venv_dir="",
+            data=None, openclaw=None, message="Dry run completed successfully (zero mutations)",
+        )
+        with mock.patch.object(CyberHealthInstaller, "_run", return_value=planned):
+            report = installer.run()
+        self.assertEqual(report.command_shim.action, "planned")
+        self.assertFalse(self.user_shim().parent.exists())
 
 
 if __name__ == "__main__":

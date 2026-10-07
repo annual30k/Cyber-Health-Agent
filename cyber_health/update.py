@@ -10,24 +10,30 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import json
 import os
 import shutil
 import subprocess
 import sys
+import typing
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .codex_integration import apply_codex_registration, find_codex_cli, plan_codex_registration
-from .core_release import CoreReleaseError, CoreReleaseStatus, cache_core_release, resolve_latest_core_release
+from .command_shim import USER_BIN_ENV, CommandShimStatus, command_shim_note, command_shim_report_lines, ensure_command_shim
+from .core_release import CoreRelease, CoreReleaseError, CoreReleaseStatus, cache_core_release, resolve_latest_core_release
 from .health_memory import HealthManagerMemoryStatus, inspect_health_manager_memory
 from .hermes_integration import (
     apply_hermes_registration,
     find_hermes_cli,
     plan_hermes_registration,
 )
+from .housekeeping import DEFAULT_BACKUP_RETENTION, HousekeepingStatus, housekeeping_report_lines, make_private, run_housekeeping
 from .install import (
     DEFAULT_INSTALL_DIR_NAME,
     FIXED_OPENCLAW_SERVER_NAME,
@@ -87,6 +93,11 @@ class UpdateReport:
     openclaw_verified: bool = False
     codex_verified: bool = False
     hermes_verified: bool = False
+    command_shim: CommandShimStatus = field(default_factory=CommandShimStatus)
+    housekeeping: HousekeepingStatus = field(default_factory=HousekeepingStatus)
+    up_to_date: bool = False
+    handed_off: bool = False
+    finished_by: str = __version__
     message: str = ""
     protected_boundaries: dict[str, bool] = field(
         default_factory=lambda: {
@@ -115,6 +126,9 @@ class CyberHealthUpdater:
         use_uv: bool = True,
         memory_plugin_release_resolver=resolve_latest_memory_plugin_release,
         core_release_resolver=resolve_latest_core_release,
+        user_bin_dir: Path | str | None = None,
+        force: bool = False,
+        keep_backups: int = DEFAULT_BACKUP_RETENTION,
     ):
         self.release_mode = project_root is None
         if project_root is None:
@@ -164,6 +178,10 @@ class CyberHealthUpdater:
         self.hermes_home = Path(hermes_home) if hermes_home else None
 
         self.dry_run = dry_run
+        self.user_bin_dir = Path(user_bin_dir) if user_bin_dir is not None else None
+        self.force = force
+        self.keep_backups = keep_backups
+        self.handoff_note = ""
         self.use_uv = use_uv
         self.new_version = self._detect_source_version()
         self.memory_status = HealthManagerMemoryStatus()
@@ -337,6 +355,7 @@ class CyberHealthUpdater:
                 with contextlib.suppress(OSError):
                     sc.unlink()
 
+        make_private(backup_file)
         status.created = True
         status.sha256 = backup_sha
         status.reason = f"Successfully created verified snapshot backup at {backup_file.name}"
@@ -611,137 +630,135 @@ class CyberHealthUpdater:
         atomic_write_text(meta_file, json.dumps(old_meta, indent=2))
 
     def run(self) -> UpdateReport:
-        old_meta = self.inspect_installation()
-        old_version = old_meta.get("version", "unknown")
-        backup_status = BackupStatus(source_db=str(self.target_db_path))
-        self.core_release_status = self.prepare_core_release()
-        recorded_memory = self.memory_from_installation_metadata(old_meta)
-        if recorded_memory.connected:
-            self.memory_status = recorded_memory
-        elif self.openclaw_bin:
-            self.memory_status = inspect_health_manager_memory(
-                self.openclaw_bin,
-                self.get_openclaw_env(),
+        report = self._run()
+        if not report.handed_off:
+            self.post_update(report)
+        return report
+
+    def post_update(self, report: UpdateReport) -> None:
+        """Local steps run by whichever version finished the update."""
+        if report.success:
+            # Older installations gain the PATH entry and private permissions on their next update.
+            report.command_shim = ensure_command_shim(
+                self.target_dir, get_venv_bin_dir(self.venv_dir), bin_dir=self.user_bin_dir, dry_run=self.dry_run
             )
+            report.housekeeping = run_housekeeping(self.target_dir, keep_backups=self.keep_backups, dry_run=self.dry_run)
         else:
-            self.memory_status = recorded_memory
+            report.command_shim = CommandShimStatus(action="skipped", reason="Update did not complete.")
+        notes = [self.handoff_note, command_shim_note(report.command_shim)]
+        if report.housekeeping.errors:
+            notes.append(f"Housekeeping issues: {'; '.join(report.housekeeping.errors)}")
+        for note in filter(None, notes):
+            report.message = f"{report.message}. {note}"
 
+    def resolve_memory_status(self, old_meta: dict[str, Any]) -> HealthManagerMemoryStatus:
+        recorded_memory = self.memory_from_installation_metadata(old_meta)
+        if recorded_memory.connected or not self.openclaw_bin:
+            return recorded_memory
+        return inspect_health_manager_memory(self.openclaw_bin, self.get_openclaw_env())
+
+    # -- hand-off: let the freshly installed version finish its own upgrade -------------
+
+    def should_hand_off(self, pkg_updated: bool) -> bool:
+        venv_python = get_venv_bin_dir(self.venv_dir) / get_executable_name("python")
+        return (
+            not self.dry_run
+            and pkg_updated
+            and self.new_version != __version__
+            and venv_python.exists()
+            and os.environ.get("CYBER_HEALTH_NO_HANDOFF", "") != "1"
+        )
+
+    def hand_off(self, old_version: str, backup_status: BackupStatus, pkg_updated: bool) -> UpdateReport | None:
+        """Run ``_finish`` with the new code; ``None`` means fall back to finishing in-process."""
+        handoff = {
+            "old_version": old_version,
+            "new_version": self.new_version,
+            "backup": asdict(backup_status),
+            "core_release": asdict(self.core_release_status),
+            "package_updated": pkg_updated,
+        }
+        handoff_file = self.config_dir / "update-handoff.json"
         try:
-            if self.core_release_status.action == "error":
-                return UpdateReport(dry_run=self.dry_run, success=False, target_dir=str(self.target_dir), old_version=old_version, new_version=self.new_version, backup=backup_status, memory=self.memory_status, core_release=self.core_release_status, message=f"Core Release update failed: {self.core_release_status.reason}")
-            backup_status = self.create_database_snapshot()
-            pkg_updated = self.upgrade_package()
-            self.memory_plugin_status = self.update_memory_plugin(old_meta)
-            if self.memory_plugin_status.action == "error":
-                return UpdateReport(
-                    dry_run=self.dry_run,
-                    success=False,
-                    target_dir=str(self.target_dir),
-                    old_version=old_version,
-                    new_version=self.new_version,
-                    backup=backup_status,
-                    memory=self.memory_status,
-                    core_release=self.core_release_status,
-                    memory_plugin=self.memory_plugin_status,
-                    package_updated=pkg_updated,
-                    message=f"Memory plugin Release update failed: {self.memory_plugin_status.reason}",
-                )
+            self.config_dir.mkdir(parents=True, exist_ok=True)
+            handoff_file.write_text(json.dumps(handoff), encoding="utf-8")
+            make_private(handoff_file)
+            cmd = [
+                # -P keeps the caller's working directory (e.g. a source checkout) off sys.path,
+                # so the child imports the newly installed package and nothing else.
+                str(get_venv_bin_dir(self.venv_dir) / get_executable_name("python")), "-P", "-m", "cyber_health.update",
+                "--json", "--finish-upgrade", str(handoff_file), "--target-dir", str(self.target_dir),
+                "--openclaw-bin", self.openclaw_bin or "", "--codex-bin", self.codex_bin or "",
+                "--hermes-bin", self.hermes_bin or "", "--keep-backups", str(self.keep_backups),
+            ]
+            for flag, value in (
+                ("--openclaw-config", self.openclaw_config), ("--openclaw-state-dir", self.openclaw_state_dir),
+                ("--codex-home", self.codex_home), ("--hermes-home", self.hermes_home),
+            ):
+                if value:
+                    cmd += [flag, str(value)]
+            if not self.release_mode:
+                cmd += ["--project-root", str(self.project_root)]
+            if not self.use_uv:
+                cmd.append("--no-uv")
+            env = dict(os.environ)
+            if self.user_bin_dir is not None:
+                env[USER_BIN_ENV] = str(self.user_bin_dir)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=900, env=env, cwd=str(self.target_dir), check=False
+            )
+            payload = json.loads(result.stdout)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return None
+        finally:
+            with contextlib.suppress(OSError):
+                handoff_file.unlink()
+        if not isinstance(payload, dict) or "backup" not in payload or "target_dir" not in payload:
+            return None
+        report = _dataclass_from_dict(UpdateReport, payload)
+        report.handed_off = True
+        return report
 
-            schema_ok = self.verify_schema_and_service()
-            if not schema_ok:
-                return UpdateReport(
-                    dry_run=self.dry_run,
-                    success=False,
-                    target_dir=str(self.target_dir),
-                    old_version=old_version,
-                    new_version=self.new_version,
-                    backup=backup_status,
-                    memory=self.memory_status,
-                    core_release=self.core_release_status,
-                    memory_plugin=self.memory_plugin_status,
-                    package_updated=pkg_updated,
-                    schema_verified=False,
-                    openclaw_verified=False,
-                    message=(
-                        "Update aborted (fail-closed): SQLite schema verification failed. "
-                        "The package may already have been upgraded; the verified database "
-                        f"backup is available at {backup_status.backup_file or 'the backup directory'}."
-                    ),
-                )
+    def run_finish(self, handoff_file: Path) -> UpdateReport:
+        """Entry point for ``--finish-upgrade``: complete an upgrade started by the previous version."""
+        handoff = json.loads(Path(handoff_file).read_text(encoding="utf-8"))
+        old_meta = self.inspect_installation()
+        old_version = str(handoff.get("old_version") or old_meta.get("version", "unknown"))
+        backup_status = _dataclass_from_dict(BackupStatus, handoff.get("backup") or {})
+        self.core_release_status = _dataclass_from_dict(CoreReleaseStatus, handoff.get("core_release") or {})
+        self.memory_status = self.resolve_memory_status(old_meta)
+        try:
+            report = self._finish(old_meta, old_version, backup_status, bool(handoff.get("package_updated")))
+        except Exception as exc:  # noqa: BLE001 - fail-closed boundary: any failure is reported, never raised past the report
+            report = UpdateReport(
+                dry_run=self.dry_run, success=False, target_dir=str(self.target_dir), old_version=old_version,
+                new_version=self.new_version, backup=backup_status, memory=self.memory_status,
+                core_release=self.core_release_status, package_updated=True, message=str(exc),
+            )
+        self.post_update(report)
+        return report
 
-            openclaw_ok = self.verify_openclaw()
-            if not openclaw_ok:
-                return UpdateReport(
-                    dry_run=self.dry_run,
-                    success=False,
-                    target_dir=str(self.target_dir),
-                    old_version=old_version,
-                    new_version=self.new_version,
-                    backup=backup_status,
-                    memory=self.memory_status,
-                    core_release=self.core_release_status,
-                    memory_plugin=self.memory_plugin_status,
-                    package_updated=pkg_updated,
-                    schema_verified=schema_ok,
-                    openclaw_verified=False,
-                    message=(
-                        "Update aborted (fail-closed): OpenClaw registration verification failed. "
-                        "The package may already have been upgraded; the verified database "
-                        f"backup is available at {backup_status.backup_file or 'the backup directory'}."
-                    ),
-                )
+    def check_for_update(self) -> dict[str, Any]:
+        """Read-only comparison of the installed version with the latest stable Core Release."""
+        installed = "unknown"
+        meta_file = self.config_dir / "installation.json"
+        with contextlib.suppress(OSError, ValueError, AttributeError):
+            installed = str(json.loads(meta_file.read_text(encoding="utf-8")).get("version", "unknown"))
+        return check_core_update(installed, self.core_release_resolver)
 
-            codex_ok = self.verify_codex()
-            if not codex_ok:
-                return UpdateReport(
-                    dry_run=self.dry_run,
-                    success=False,
-                    target_dir=str(self.target_dir),
-                    old_version=old_version,
-                    new_version=self.new_version,
-                    backup=backup_status,
-                    memory=self.memory_status,
-                    core_release=self.core_release_status,
-                    memory_plugin=self.memory_plugin_status,
-                    package_updated=pkg_updated,
-                    schema_verified=schema_ok,
-                    openclaw_verified=True,
-                    codex_verified=False,
-                    message=(
-                        "Update aborted (fail-closed): Codex registration verification failed. "
-                        "The package may already have been upgraded; the verified database "
-                        f"backup is available at {backup_status.backup_file or 'the backup directory'}."
-                    ),
-                )
-
-            hermes_ok = self.verify_hermes()
-            if not hermes_ok:
-                return UpdateReport(
-                    dry_run=self.dry_run,
-                    success=False,
-                    target_dir=str(self.target_dir),
-                    old_version=old_version,
-                    new_version=self.new_version,
-                    backup=backup_status,
-                    memory=self.memory_status,
-                    memory_plugin=self.memory_plugin_status,
-                    package_updated=pkg_updated,
-                    schema_verified=schema_ok,
-                    openclaw_verified=True,
-                    codex_verified=True,
-                    hermes_verified=False,
-                    message=(
-                        "Update aborted (fail-closed): Hermes registration verification failed. "
-                        "The package may already have been upgraded; the verified database "
-                        f"backup is available at {backup_status.backup_file or 'the backup directory'}."
-                    ),
-                )
-
-            self.update_metadata(old_meta, backup_status)
-
+    def _finish(
+        self,
+        old_meta: dict[str, Any],
+        old_version: str,
+        backup_status: BackupStatus,
+        pkg_updated: bool,
+    ) -> UpdateReport:
+        """Everything after the package upgrade: plugin refresh, verification and metadata."""
+        self.memory_plugin_status = self.update_memory_plugin(old_meta)
+        if self.memory_plugin_status.action == "error":
             return UpdateReport(
                 dry_run=self.dry_run,
-                success=True,
+                success=False,
                 target_dir=str(self.target_dir),
                 old_version=old_version,
                 new_version=self.new_version,
@@ -750,12 +767,154 @@ class CyberHealthUpdater:
                 core_release=self.core_release_status,
                 memory_plugin=self.memory_plugin_status,
                 package_updated=pkg_updated,
-                schema_verified=True,
+                message=f"Memory plugin Release update failed: {self.memory_plugin_status.reason}",
+            )
+
+        schema_ok = self.verify_schema_and_service()
+        if not schema_ok:
+            return UpdateReport(
+                dry_run=self.dry_run,
+                success=False,
+                target_dir=str(self.target_dir),
+                old_version=old_version,
+                new_version=self.new_version,
+                backup=backup_status,
+                memory=self.memory_status,
+                core_release=self.core_release_status,
+                memory_plugin=self.memory_plugin_status,
+                package_updated=pkg_updated,
+                schema_verified=False,
+                openclaw_verified=False,
+                message=(
+                    "Update aborted (fail-closed): SQLite schema verification failed. "
+                    "The package may already have been upgraded; the verified database "
+                    f"backup is available at {backup_status.backup_file or 'the backup directory'}."
+                ),
+            )
+
+        openclaw_ok = self.verify_openclaw()
+        if not openclaw_ok:
+            return UpdateReport(
+                dry_run=self.dry_run,
+                success=False,
+                target_dir=str(self.target_dir),
+                old_version=old_version,
+                new_version=self.new_version,
+                backup=backup_status,
+                memory=self.memory_status,
+                core_release=self.core_release_status,
+                memory_plugin=self.memory_plugin_status,
+                package_updated=pkg_updated,
+                schema_verified=schema_ok,
+                openclaw_verified=False,
+                message=(
+                    "Update aborted (fail-closed): OpenClaw registration verification failed. "
+                    "The package may already have been upgraded; the verified database "
+                    f"backup is available at {backup_status.backup_file or 'the backup directory'}."
+                ),
+            )
+
+        codex_ok = self.verify_codex()
+        if not codex_ok:
+            return UpdateReport(
+                dry_run=self.dry_run,
+                success=False,
+                target_dir=str(self.target_dir),
+                old_version=old_version,
+                new_version=self.new_version,
+                backup=backup_status,
+                memory=self.memory_status,
+                core_release=self.core_release_status,
+                memory_plugin=self.memory_plugin_status,
+                package_updated=pkg_updated,
+                schema_verified=schema_ok,
+                openclaw_verified=True,
+                codex_verified=False,
+                message=(
+                    "Update aborted (fail-closed): Codex registration verification failed. "
+                    "The package may already have been upgraded; the verified database "
+                    f"backup is available at {backup_status.backup_file or 'the backup directory'}."
+                ),
+            )
+
+        hermes_ok = self.verify_hermes()
+        if not hermes_ok:
+            return UpdateReport(
+                dry_run=self.dry_run,
+                success=False,
+                target_dir=str(self.target_dir),
+                old_version=old_version,
+                new_version=self.new_version,
+                backup=backup_status,
+                memory=self.memory_status,
+                memory_plugin=self.memory_plugin_status,
+                package_updated=pkg_updated,
+                schema_verified=schema_ok,
                 openclaw_verified=True,
                 codex_verified=True,
-                hermes_verified=True,
-                message="Update completed successfully",
+                hermes_verified=False,
+                message=(
+                    "Update aborted (fail-closed): Hermes registration verification failed. "
+                    "The package may already have been upgraded; the verified database "
+                    f"backup is available at {backup_status.backup_file or 'the backup directory'}."
+                ),
             )
+
+        self.update_metadata(old_meta, backup_status)
+
+        return UpdateReport(
+            dry_run=self.dry_run,
+            success=True,
+            target_dir=str(self.target_dir),
+            old_version=old_version,
+            new_version=self.new_version,
+            backup=backup_status,
+            memory=self.memory_status,
+            core_release=self.core_release_status,
+            memory_plugin=self.memory_plugin_status,
+            package_updated=pkg_updated,
+            schema_verified=True,
+            openclaw_verified=True,
+            codex_verified=True,
+            hermes_verified=True,
+            message="Update completed successfully",
+        )
+
+    def _run(self) -> UpdateReport:
+        old_meta = self.inspect_installation()
+        old_version = old_meta.get("version", "unknown")
+        backup_status = BackupStatus(source_db=str(self.target_db_path))
+        self.core_release_status = self.prepare_core_release()
+        self.memory_status = self.resolve_memory_status(old_meta)
+
+        try:
+            if self.core_release_status.action == "error":
+                return UpdateReport(dry_run=self.dry_run, success=False, target_dir=str(self.target_dir), old_version=old_version, new_version=self.new_version, backup=backup_status, memory=self.memory_status, core_release=self.core_release_status, message=f"Core Release update failed: {self.core_release_status.reason}")
+            if self.release_mode and not self.force and old_version == self.new_version:
+                return UpdateReport(
+                    dry_run=self.dry_run,
+                    success=True,
+                    target_dir=str(self.target_dir),
+                    old_version=old_version,
+                    new_version=self.new_version,
+                    backup=BackupStatus(source_db=str(self.target_db_path), reason="Already up to date; no backup was needed."),
+                    memory=self.memory_status,
+                    core_release=CoreReleaseStatus(
+                        action="current", version=self.new_version, reason="The installed version is the latest stable Core Release."
+                    ),
+                    up_to_date=True,
+                    message=f"Already up to date ({self.new_version}); nothing was reinstalled. Use --force to reinstall and re-verify.",
+                )
+            backup_status = self.create_database_snapshot()
+            pkg_updated = self.upgrade_package()
+            if self.should_hand_off(pkg_updated):
+                relayed = self.hand_off(old_version, backup_status, pkg_updated)
+                if relayed is not None:
+                    return relayed
+                self.handoff_note = (
+                    "The new version could not finish the upgrade itself, so the previous updater verified it."
+                )
+            return self._finish(old_meta, old_version, backup_status, pkg_updated)
         except Exception as exc:  # noqa: BLE001 - fail-closed boundary: any failure is reported, never raised past the report
             return UpdateReport(
                 dry_run=self.dry_run,
@@ -769,6 +928,34 @@ class CyberHealthUpdater:
                 memory_plugin=self.memory_plugin_status,
                 message=str(exc),
             )
+
+
+def check_core_update(installed_version: str, resolver: Callable[[], CoreRelease] = resolve_latest_core_release) -> dict[str, Any]:
+    try:
+        release = resolver()
+    except CoreReleaseError as exc:
+        return {"installed_version": installed_version, "latest_version": None, "update_available": None, "error": str(exc)}
+    return {
+        "installed_version": installed_version,
+        "latest_version": release.version,
+        "update_available": release.version != installed_version,
+        "release_url": release.release_url,
+        "error": None,
+    }
+
+
+def _dataclass_from_dict(cls: Any, data: dict[str, Any]) -> Any:
+    """Rebuild a (nested) report dataclass, ignoring fields this version does not know."""
+    hints = typing.get_type_hints(cls)
+    kwargs = {}
+    for item in dataclasses.fields(cls):
+        if item.name not in data:
+            continue
+        value, kind = data[item.name], hints.get(item.name)
+        if dataclasses.is_dataclass(kind) and isinstance(value, dict):
+            value = _dataclass_from_dict(kind, value)
+        kwargs[item.name] = value
+    return cls(**kwargs)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -807,6 +994,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="OpenClaw state directory override.",
     )
     parser.add_argument("--codex-bin", type=str, default=_DEFAULT_BIN, help="Codex CLI binary path override.")
+    parser.add_argument("--force", action="store_true", help="Reinstall and re-verify even when already up to date.")
+    parser.add_argument("--check", action="store_true", help="Only report whether a newer stable Release exists.")
+    parser.add_argument(
+        "--keep-backups", type=int, default=DEFAULT_BACKUP_RETENTION, help="Rolling update backups to keep (default 10)."
+    )
+    parser.add_argument("--finish-upgrade", type=str, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--codex-home", type=str, default=None, help="Codex home override (primarily for isolated testing).")
     parser.add_argument("--hermes-bin", type=str, default=_DEFAULT_BIN, help="Hermes CLI binary path override.")
     parser.add_argument("--hermes-home", type=str, default=None, help="Hermes home override (primarily for isolated testing).")
@@ -867,6 +1060,8 @@ def format_text_report(report: UpdateReport) -> str:
         f"Reason           : {report.memory.reason}",
         *[f"Warning          : {warning}" for warning in report.memory.warnings],
         "",
+        *command_shim_report_lines(report.command_shim),
+        *housekeeping_report_lines(report.housekeeping),
         "--- Protected Boundaries ---",
         "  + obsidian-memory: STRICTLY PRESERVED (Untouched)",
         "  + Obsidian Vaults: STRICTLY PRESERVED (Untouched)",
@@ -895,8 +1090,21 @@ def main(argv: list[str] | None = None) -> int:
             hermes_home=args.hermes_home,
             dry_run=args.dry_run,
             use_uv=not args.no_uv,
+            force=args.force,
+            keep_backups=args.keep_backups,
         )
-        report = updater.run()
+        if args.check:
+            result = updater.check_for_update()
+            if args.json:
+                print(json.dumps(result, indent=2))
+            elif result["error"]:
+                print(f"Could not check for updates: {result['error']}", file=sys.stderr)
+            elif result["update_available"]:
+                print(f"Update available: {result['installed_version']} -> {result['latest_version']} ({result['release_url']})")
+            else:
+                print(f"Up to date: {result['installed_version']}")
+            return 1 if result["error"] else 0
+        report = updater.run_finish(Path(args.finish_upgrade)) if args.finish_upgrade else updater.run()
     except Exception as exc:  # noqa: BLE001 - CLI boundary: any failure is reported as JSON or stderr with exit code 1
         if args.json:
             print(
