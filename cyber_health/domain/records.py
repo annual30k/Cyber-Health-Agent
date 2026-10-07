@@ -9,19 +9,22 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from ..errors import ConflictError, ValidationError
-from ..models import ExportDataInput, ImportDataInput, _check_iso_instant, _check_real_date
-from .base import _INVALID_ZONE_ERRORS, _MALFORMED_RECORD_ERRORS, ServiceCore
+from ..models import ImportDataInput, _check_iso_instant, _check_real_date
+from .base import _INVALID_ZONE_ERRORS, _MALFORMED_RECORD_ERRORS, OWNER_ID, ServiceCore
+
+# Identities used by pre-0.4.2 exports; their facts are imported into the owner partition.
+_LEGACY_DEFAULT_USERS = ("u_default", "default")
 
 
 class RecordsMixin(ServiceCore):
     """Audit trail, health check, export and verified import of facts."""
 
-    def get_audit_trail(self, user_id: str, limit: int = 100) -> list[dict[str, Any]]:
+    def get_audit_trail(self, limit: int = 100) -> list[dict[str, Any]]:
         with self.store.connect() as conn:
             rows = conn.execute(
                 """SELECT operation_id, action, result_status, before_version, after_version, created_at
                    FROM operation_log WHERE user_id = ? ORDER BY created_at DESC LIMIT ?""",
-                (user_id, limit),
+                (OWNER_ID, limit),
             ).fetchall()
             return [dict(row) for row in rows]
 
@@ -47,19 +50,14 @@ class RecordsMixin(ServiceCore):
             "pending_memory_outbox": pending_outbox,
         }
 
-    def export_data(self, *, user_id: str) -> dict[str, Any]:
+    def export_data(self) -> dict[str, Any]:
         """Export all user health facts from SQLite into a portable schema."""
-        try:
-            ExportDataInput(user_id=user_id)
-        except Exception as err:
-            raise ValidationError(str(err)) from err
-
         with self.store.connect() as conn:
-            profile = conn.execute("SELECT * FROM user_profile WHERE user_id = ?", (user_id,)).fetchone()
-            meals = [dict(r) for r in conn.execute("SELECT * FROM meal_log WHERE user_id = ?", (user_id,)).fetchall()]
-            domain_records = [dict(r) for r in conn.execute("SELECT * FROM domain_record WHERE user_id = ?", (user_id,)).fetchall()]
-            schedules = [dict(r) for r in conn.execute("SELECT * FROM schedule_event WHERE user_id = ?", (user_id,)).fetchall()]
-            ops = [dict(r) for r in conn.execute("SELECT * FROM operation_log WHERE user_id = ? ORDER BY created_at ASC", (user_id,)).fetchall()]
+            profile = conn.execute("SELECT * FROM user_profile WHERE user_id = ?", (OWNER_ID,)).fetchone()
+            meals = [dict(r) for r in conn.execute("SELECT * FROM meal_log WHERE user_id = ?", (OWNER_ID,)).fetchall()]
+            domain_records = [dict(r) for r in conn.execute("SELECT * FROM domain_record WHERE user_id = ?", (OWNER_ID,)).fetchall()]
+            schedules = [dict(r) for r in conn.execute("SELECT * FROM schedule_event WHERE user_id = ?", (OWNER_ID,)).fetchall()]
+            ops = [dict(r) for r in conn.execute("SELECT * FROM operation_log WHERE user_id = ? ORDER BY created_at ASC", (OWNER_ID,)).fetchall()]
 
         operation_id = f"op_read_{uuid.uuid4().hex[:12]}"
         facts = {
@@ -75,7 +73,7 @@ class RecordsMixin(ServiceCore):
         data = {
             "schema_version": "0.1.0",
             "exported_at": self._now(),
-            "user_id": user_id,
+            "user_id": OWNER_ID,
             "facts": facts,
         }
         return {
@@ -91,17 +89,16 @@ class RecordsMixin(ServiceCore):
     def import_data(
         self,
         *,
-        user_id: str,
         data: dict[str, Any],
         idempotency_key: str,
     ) -> dict[str, Any]:
         """Idempotently import user health facts into SQLite store."""
         try:
-            ImportDataInput(user_id=user_id, data=data, idempotency_key=idempotency_key)
+            ImportDataInput(data=data, idempotency_key=idempotency_key)
         except Exception as err:
             raise ValidationError(str(err)) from err
 
-        payload = {"action": "import_data", "user_id": user_id, "data": data}
+        payload = {"action": "import_data", "user_id": OWNER_ID, "data": data}
         now, operation_id = self._now(), f"op_{uuid.uuid4().hex}"
 
         SUPPORTED_SCHEMA_VERSIONS = {"0.1.0", "0.2.0", "0.2.1"}
@@ -109,7 +106,7 @@ class RecordsMixin(ServiceCore):
         with self.store.transaction() as conn:
             # 1. Idempotency check FIRST to ensure key replay returns exact cached response
             # or IdempotencyMismatchError if payload differs
-            existing = self._check_idempotency(conn, user_id, idempotency_key, "import_data", payload)
+            existing = self._check_idempotency(conn, idempotency_key, "import_data", payload)
             if existing:
                 return existing
 
@@ -125,9 +122,9 @@ class RecordsMixin(ServiceCore):
                 raise ValidationError("Import data must contain a valid 'facts' dictionary")
 
             incoming_user = data.get("user_id")
-            legacy_remap = (user_id == "owner" and (incoming_user in ("u_default", "default") or not incoming_user))
-            if incoming_user and incoming_user != user_id and not legacy_remap:
-                raise ValidationError(f"Import data user_id '{data['user_id']}' does not match target user '{user_id}'")
+            legacy_remap = incoming_user in _LEGACY_DEFAULT_USERS or not incoming_user
+            if incoming_user and incoming_user != OWNER_ID and not legacy_remap:
+                raise ValidationError(f"Import data user_id '{data['user_id']}' does not match target user '{OWNER_ID}'")
 
             checksum = data.get("checksum")
             if checksum is not None:
@@ -138,8 +135,8 @@ class RecordsMixin(ServiceCore):
                 if computed_hash != checksum:
                     raise ValidationError("Checksum verification failed: facts integrity check failed")
 
-            self._ensure_profile_in_tx(conn, user_id, now)
-            profile = conn.execute("SELECT * FROM user_profile WHERE user_id = ?", (user_id,)).fetchone()
+            self._ensure_profile_in_tx(conn, now)
+            profile = conn.execute("SELECT * FROM user_profile WHERE user_id = ?", (OWNER_ID,)).fetchone()
             before_version = profile["state_version"]
             current_sm = profile["safety_mode"]
             current_flags = json.loads(profile["safety_flags_json"] or "[]")
@@ -152,9 +149,9 @@ class RecordsMixin(ServiceCore):
                     raise ValidationError("facts.profile must be a dictionary")
 
                 p_user = imported_profile.get("user_id")
-                if p_user and p_user != user_id and not (user_id == "owner" and p_user in ("u_default", "default")):
+                if p_user and p_user != OWNER_ID and p_user not in _LEGACY_DEFAULT_USERS:
                     raise ValidationError(
-                        f"Profile user_id '{imported_profile['user_id']}' does not match target user '{user_id}'"
+                        f"Profile user_id '{imported_profile['user_id']}' does not match target user '{OWNER_ID}'"
                     )
 
                 # Timezone validation
@@ -274,7 +271,7 @@ class RecordsMixin(ServiceCore):
                         safety_flags_json = ?, safety_mode = ?, deload_until = ?,
                         state_version = ?, updated_at = ?
                        WHERE user_id = ?""",
-                    (tz, gj, cj, sfj, sm, du, target_version, now, user_id),
+                    (tz, gj, cj, sfj, sm, du, target_version, now, OWNER_ID),
                 )
 
             imported_meals = 0
@@ -289,8 +286,8 @@ class RecordsMixin(ServiceCore):
                 if not mid or not isinstance(mid, str):
                     raise ValidationError("Meal records in facts must have a non-empty string meal_id")
                 m_user = m.get("user_id")
-                if m_user and m_user != user_id and not (user_id == "owner" and m_user in ("u_default", "default")):
-                    raise ValidationError(f"Meal record '{mid}' user_id does not match import user '{user_id}'")
+                if m_user and m_user != OWNER_ID and m_user not in _LEGACY_DEFAULT_USERS:
+                    raise ValidationError(f"Meal record '{mid}' user_id does not match import user '{OWNER_ID}'")
 
                 occurred_at = m.get("occurred_at")
                 if not occurred_at or not isinstance(occurred_at, str):
@@ -341,7 +338,7 @@ class RecordsMixin(ServiceCore):
 
                     # All persisted fields checked including causation_id and state_version
                     if (
-                        ex["user_id"] != user_id
+                        ex["user_id"] != OWNER_ID
                         or ex["occurred_at"] != occurred_at
                         or ex["meal_type"] != meal_type
                         or ex["kcal_low"] != k_low
@@ -365,7 +362,7 @@ class RecordsMixin(ServiceCore):
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         mid,
-                        user_id,
+                        OWNER_ID,
                         occurred_at,
                         meal_type,
                         m_foods,
@@ -390,8 +387,8 @@ class RecordsMixin(ServiceCore):
                 if not rid or not isinstance(rid, str):
                     raise ValidationError("Domain records in facts must have a non-empty string record_id")
                 d_user = d.get("user_id")
-                if d_user and d_user != user_id and not (user_id == "owner" and d_user in ("u_default", "default")):
-                    raise ValidationError(f"Domain record '{rid}' user_id does not match import user '{user_id}'")
+                if d_user and d_user != OWNER_ID and d_user not in _LEGACY_DEFAULT_USERS:
+                    raise ValidationError(f"Domain record '{rid}' user_id does not match import user '{OWNER_ID}'")
 
                 kind = d.get("kind")
                 day = d.get("day")
@@ -429,7 +426,7 @@ class RecordsMixin(ServiceCore):
                         body_match = (ex["body_json"] == d_body)
 
                     if (
-                        ex["user_id"] != user_id
+                        ex["user_id"] != OWNER_ID
                         or ex["kind"] != kind
                         or ex["day"] != day
                         or ex["status"] != d_status
@@ -448,7 +445,7 @@ class RecordsMixin(ServiceCore):
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         rid,
-                        user_id,
+                        OWNER_ID,
                         kind,
                         day,
                         d_body,
@@ -469,8 +466,8 @@ class RecordsMixin(ServiceCore):
                 if not sid or not isinstance(sid, str):
                     raise ValidationError("Schedule events in facts must have a non-empty string event_id")
                 s_user = s.get("user_id")
-                if s_user and s_user != user_id and not (user_id == "owner" and s_user in ("u_default", "default")):
-                    raise ValidationError(f"Schedule event '{sid}' user_id does not match import user '{user_id}'")
+                if s_user and s_user != OWNER_ID and s_user not in _LEGACY_DEFAULT_USERS:
+                    raise ValidationError(f"Schedule event '{sid}' user_id does not match import user '{OWNER_ID}'")
 
                 ev_type = s.get("event_type")
                 w_start = s.get("window_start")
@@ -494,7 +491,7 @@ class RecordsMixin(ServiceCore):
                 ex = conn.execute("SELECT * FROM schedule_event WHERE event_id = ?", (sid,)).fetchone()
                 if ex:
                     if (
-                        ex["user_id"] != user_id
+                        ex["user_id"] != OWNER_ID
                         or ex["event_type"] != ev_type
                         or ex["window_start"] != w_start
                         or ex["window_end"] != w_end
@@ -512,7 +509,7 @@ class RecordsMixin(ServiceCore):
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         sid,
-                        user_id,
+                        OWNER_ID,
                         ev_type,
                         w_start,
                         w_end,
@@ -533,8 +530,8 @@ class RecordsMixin(ServiceCore):
                 opid = op.get("operation_id")
                 if not opid or not isinstance(opid, str):
                     raise ValidationError("Operation records in facts must have a non-empty string operation_id")
-                if op.get("user_id") and op["user_id"] != user_id:
-                    raise ValidationError(f"Operation record '{opid}' user_id does not match import user '{user_id}'")
+                if op.get("user_id") and op["user_id"] != OWNER_ID:
+                    raise ValidationError(f"Operation record '{opid}' user_id does not match import user '{OWNER_ID}'")
 
                 op_action = op.get("action", "unknown")
                 op_resp = op.get("response_json", "{}")
@@ -547,7 +544,7 @@ class RecordsMixin(ServiceCore):
                 ex = conn.execute("SELECT * FROM operation_log WHERE operation_id = ?", (opid,)).fetchone()
                 if ex:
                     if (
-                        ex["user_id"] != user_id
+                        ex["user_id"] != OWNER_ID
                         or ex["action"] != op_action
                         or (op.get("idempotency_key") is not None and ex["idempotency_key"] != op.get("idempotency_key"))
                         or (op.get("request_hash") is not None and ex["request_hash"] != op.get("request_hash"))
@@ -565,7 +562,7 @@ class RecordsMixin(ServiceCore):
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         opid,
-                        user_id,
+                        OWNER_ID,
                         op.get("idempotency_key", opid),
                         op.get("request_hash", ""),
                         op_action,
@@ -580,11 +577,11 @@ class RecordsMixin(ServiceCore):
             after_version = target_version + 1
             conn.execute(
                 "UPDATE user_profile SET state_version = ?, updated_at = ? WHERE user_id = ?",
-                (after_version, now, user_id),
+                (after_version, now, OWNER_ID),
             )
 
             res_data = {
-                "user_id": user_id,
+                "user_id": OWNER_ID,
                 "imported_profile": imported_profile is not None,
                 "imported_meals": imported_meals,
                 "imported_domain_records": imported_domain,
@@ -599,7 +596,6 @@ class RecordsMixin(ServiceCore):
             self._record_operation(
                 conn,
                 operation_id=operation_id,
-                user_id=user_id,
                 idempotency_key=idempotency_key,
                 payload=payload,
                 action="import_data",

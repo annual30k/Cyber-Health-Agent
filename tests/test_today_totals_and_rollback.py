@@ -23,10 +23,8 @@ class TestTodayTotalsAndRollback(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_today_totals_date_bounds(self) -> None:
-        user_id = SINGLE_USER_ID
         # Log meals across multiple days
         self.service.log_meal(
-            user_id=user_id,
             occurred_at="2026-09-10T12:00:00+08:00",
             meal_type="lunch",
             foods=[FoodItem(name="Rice")],
@@ -37,7 +35,6 @@ class TestTodayTotalsAndRollback(unittest.TestCase):
             idempotency_key="meal_day10",
         )
         self.service.log_meal(
-            user_id=user_id,
             occurred_at="2026-09-20T12:00:00+08:00",
             meal_type="lunch",
             foods=[FoodItem(name="Steak")],
@@ -49,36 +46,34 @@ class TestTodayTotalsAndRollback(unittest.TestCase):
         )
 
         # Query 2026-09-20
-        res = self.service.get_today(user_id=user_id, day="2026-09-20")
+        res = self.service.get_today(day="2026-09-20")
         today = res["data"]["nutrition"]
         self.assertEqual(today["meal_count"], 1)
         self.assertEqual(today["kcal_low"], 600)
         self.assertEqual(today["protein_low"], 40)
 
         # Query 2026-09-10
-        res10 = self.service.get_today(user_id=user_id, day="2026-09-10")
+        res10 = self.service.get_today(day="2026-09-10")
         today10 = res10["data"]["nutrition"]
         self.assertEqual(today10["meal_count"], 1)
         self.assertEqual(today10["kcal_low"], 400)
         self.assertEqual(today10["protein_low"], 10)
 
         # Query 2026-09-15 (empty)
-        res15 = self.service.get_today(user_id=user_id, day="2026-09-15")
+        res15 = self.service.get_today(day="2026-09-15")
         self.assertEqual(res15["data"]["nutrition"]["meal_count"], 0)
 
     def test_get_today_rollback_preserves_root_exception(self) -> None:
-        user_id = SINGLE_USER_ID
         # Induce an intentional exception inside get_today by mocking _today_totals
         with patch.object(self.service, "_today_totals", side_effect=ZeroDivisionError("simulated root error")):
             with self.assertRaises(ZeroDivisionError) as ctx:
-                self.service.get_today(user_id=user_id, day="2026-09-20")
+                self.service.get_today(day="2026-09-20")
             self.assertEqual(str(ctx.exception), "simulated root error")
 
     def test_get_schedule_rollback_preserves_root_exception(self) -> None:
         import json
         user_id = SINGLE_USER_ID
         self.service.update_profile(
-            user_id=user_id,
             goals={"target_kcal_low": 2000, "target_kcal_high": 2500},
             idempotency_key="setup_profile_goals",
         )
@@ -86,12 +81,10 @@ class TestTodayTotalsAndRollback(unittest.TestCase):
             conn.execute("UPDATE user_profile SET goals_json = '{bad-json' WHERE user_id = ?", (user_id,))
 
         with self.assertRaises(json.JSONDecodeError):
-            self.service.get_schedule(user_id=user_id, date="2026-09-20")
+            self.service.get_schedule(date="2026-09-20")
 
     def test_log_meal_audit_fields_recorded_in_payload(self) -> None:
-        user_id = SINGLE_USER_ID
         res = self.service.log_meal(
-            user_id=user_id,
             occurred_at="2026-09-20T12:00:00+08:00",
             meal_type="lunch",
             foods=[FoodItem(name="Salad")],
@@ -117,7 +110,6 @@ class TestTodayTotalsAndRollback(unittest.TestCase):
             self.assertEqual(op["action"], "log_meal")
 
     def test_legacy_user_import_into_owner(self) -> None:
-        user_id = SINGLE_USER_ID
         legacy_export = {
             "schema_version": "0.2.1",
             "user_id": "u_default",
@@ -154,7 +146,6 @@ class TestTodayTotalsAndRollback(unittest.TestCase):
 
         # Importing legacy export into SINGLE_USER_ID ("owner") must succeed without user mismatch ValidationError
         res = self.service.import_data(
-            user_id=user_id,
             data=legacy_export,
             idempotency_key="import_legacy_u_default",
         )

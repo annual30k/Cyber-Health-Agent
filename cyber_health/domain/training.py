@@ -18,7 +18,7 @@ from ..models import (
     LogWorkoutInput,
     SubstituteExerciseInput,
 )
-from .base import _MALFORMED_RECORD_ERRORS, ServiceCore
+from .base import _MALFORMED_RECORD_ERRORS, OWNER_ID, ServiceCore
 from .catalog import EXERCISE_CATALOG, RED_FLAG_KEYWORDS
 
 
@@ -28,7 +28,6 @@ class TrainingMixin(ServiceCore):
     def log_daily_metrics(
         self,
         *,
-        user_id: str,
         date: str,
         metrics: dict[str, Any],
         idempotency_key: str,
@@ -36,7 +35,6 @@ class TrainingMixin(ServiceCore):
     ) -> dict[str, Any]:
         try:
             validated = LogDailyMetricsInput(
-                user_id=user_id,
                 date=date,
                 metrics=DailyMetricsInput(**metrics),
                 idempotency_key=idempotency_key,
@@ -47,7 +45,7 @@ class TrainingMixin(ServiceCore):
 
         payload = {
             "action": "log_daily_metrics",
-            "user_id": user_id,
+            "user_id": OWNER_ID,
             "date": date,
             "metrics": validated.metrics.model_dump(),
             "expected_state_version": expected_state_version,
@@ -55,12 +53,12 @@ class TrainingMixin(ServiceCore):
         now, operation_id = self._now(), f"op_{uuid.uuid4().hex}"
 
         with self.store.transaction() as conn:
-            existing = self._check_idempotency(conn, user_id, idempotency_key, "log_daily_metrics", payload)
+            existing = self._check_idempotency(conn, idempotency_key, "log_daily_metrics", payload)
             if existing:
                 return existing
 
-            self._ensure_profile_in_tx(conn, user_id, now)
-            profile = conn.execute("SELECT * FROM user_profile WHERE user_id = ?", (user_id,)).fetchone()
+            self._ensure_profile_in_tx(conn, now)
+            profile = conn.execute("SELECT * FROM user_profile WHERE user_id = ?", (OWNER_ID,)).fetchone()
             before_version = profile["state_version"]
 
             if expected_state_version is not None and expected_state_version != before_version:
@@ -73,7 +71,7 @@ class TrainingMixin(ServiceCore):
                 """SELECT record_id, body_json FROM domain_record
                    WHERE user_id = ? AND kind = 'daily_state' AND day = ? AND status = 'active'
                    ORDER BY created_at DESC LIMIT 1""",
-                (user_id, date),
+                (OWNER_ID, date),
             ).fetchone()
             parent_ds_id = None
             merged_metrics: dict[str, Any] = {}
@@ -136,7 +134,7 @@ class TrainingMixin(ServiceCore):
                         flags.append(rf)
                 conn.execute(
                     "UPDATE user_profile SET safety_mode = 'restricted', safety_flags_json = ? WHERE user_id = ?",
-                    (self.store.json(flags), user_id),
+                    (self.store.json(flags), OWNER_ID),
                 )
                 warnings.append(
                     f"TRAIN_SAFETY_01: Red flag symptom '{', '.join(detected_red_flags)}' detected. "
@@ -146,7 +144,7 @@ class TrainingMixin(ServiceCore):
             after_version = before_version + 1
             conn.execute(
                 "UPDATE user_profile SET state_version = ?, updated_at = ? WHERE user_id = ?",
-                (after_version, now, user_id),
+                (after_version, now, OWNER_ID),
             )
 
             record_id = f"ds_{uuid.uuid4().hex}"
@@ -160,7 +158,7 @@ class TrainingMixin(ServiceCore):
                 """INSERT INTO domain_record(
                     record_id, user_id, kind, day, body_json, parent_id, status, causation_id, state_version, created_at
                 ) VALUES (?, ?, 'daily_state', ?, ?, ?, 'active', ?, ?, ?)""",
-                (record_id, user_id, date, self.store.json(domain_body), parent_ds_id, operation_id, after_version, now),
+                (record_id, OWNER_ID, date, self.store.json(domain_body), parent_ds_id, operation_id, after_version, now),
             )
 
             data = {
@@ -181,7 +179,6 @@ class TrainingMixin(ServiceCore):
             self._record_operation(
                 conn,
                 operation_id=operation_id,
-                user_id=user_id,
                 idempotency_key=idempotency_key,
                 payload=payload,
                 action="log_daily_metrics",
@@ -194,7 +191,6 @@ class TrainingMixin(ServiceCore):
     def log_workout(
         self,
         *,
-        user_id: str,
         date: str,
         idempotency_key: str,
         session_id: str | None = None,
@@ -209,7 +205,6 @@ class TrainingMixin(ServiceCore):
     ) -> dict[str, Any]:
         try:
             validated = LogWorkoutInput(
-                user_id=user_id,
                 session_id=session_id,
                 date=date,
                 planned_exercises=planned_exercises or [],
@@ -237,7 +232,7 @@ class TrainingMixin(ServiceCore):
 
         payload = {
             "action": "log_workout",
-            "user_id": user_id,
+            "user_id": OWNER_ID,
             "session_id": session_id,
             "date": date,
             "planned_exercises": planned_exercises or [],
@@ -253,12 +248,12 @@ class TrainingMixin(ServiceCore):
         now, operation_id = self._now(), f"op_{uuid.uuid4().hex}"
 
         with self.store.transaction() as conn:
-            existing = self._check_idempotency(conn, user_id, idempotency_key, "log_workout", payload)
+            existing = self._check_idempotency(conn, idempotency_key, "log_workout", payload)
             if existing:
                 return existing
 
-            self._ensure_profile_in_tx(conn, user_id, now)
-            profile = conn.execute("SELECT * FROM user_profile WHERE user_id = ?", (user_id,)).fetchone()
+            self._ensure_profile_in_tx(conn, now)
+            profile = conn.execute("SELECT * FROM user_profile WHERE user_id = ?", (OWNER_ID,)).fetchone()
             before_version = profile["state_version"]
 
             if expected_state_version is not None and expected_state_version != before_version:
@@ -285,7 +280,7 @@ class TrainingMixin(ServiceCore):
                         flags.append(rf)
                 conn.execute(
                     "UPDATE user_profile SET safety_mode = 'restricted', safety_flags_json = ? WHERE user_id = ?",
-                    (self.store.json(flags), user_id),
+                    (self.store.json(flags), OWNER_ID),
                 )
                 warnings.append(
                     f"TRAIN_SAFETY_01: Red flag symptom '{', '.join(detected_red_flags)}' reported in workout. "
@@ -302,14 +297,14 @@ class TrainingMixin(ServiceCore):
             after_version = before_version + 1
             conn.execute(
                 "UPDATE user_profile SET state_version = ?, updated_at = ? WHERE user_id = ?",
-                (after_version, now, user_id),
+                (after_version, now, OWNER_ID),
             )
 
             record_id = session_id or f"wo_{uuid.uuid4().hex}"
             existing_session = conn.execute(
                 """SELECT body_json FROM domain_record
                    WHERE record_id = ? AND user_id = ? AND kind = 'workout_log' AND status = 'active'""",
-                (record_id, user_id),
+                (record_id, OWNER_ID),
             ).fetchone()
             prior_body: dict[str, Any] = {}
             if existing_session:
@@ -349,7 +344,7 @@ class TrainingMixin(ServiceCore):
                     """INSERT INTO domain_record(
                         record_id, user_id, kind, day, body_json, status, causation_id, state_version, created_at
                     ) VALUES (?, ?, 'workout_log', ?, ?, 'active', ?, ?, ?)""",
-                    (record_id, user_id, date, self.store.json(workout_body), operation_id, after_version, now),
+                    (record_id, OWNER_ID, date, self.store.json(workout_body), operation_id, after_version, now),
                 )
 
             data = {
@@ -371,7 +366,6 @@ class TrainingMixin(ServiceCore):
             self._record_operation(
                 conn,
                 operation_id=operation_id,
-                user_id=user_id,
                 idempotency_key=idempotency_key,
                 payload=payload,
                 action="log_workout",
@@ -384,7 +378,6 @@ class TrainingMixin(ServiceCore):
     def get_training_plan(
         self,
         *,
-        user_id: str,
         date: str,
         equipment: list[str] | None = None,
         target_duration_min: int = 45,
@@ -394,7 +387,6 @@ class TrainingMixin(ServiceCore):
         win_days = evidence_window_days if evidence_window_days is not None else self.recovery_evidence_window_days
         try:
             GetTrainingPlanInput(
-                user_id=user_id,
                 date=date,
                 equipment=equipment or [],
                 target_duration_min=target_duration_min,
@@ -406,23 +398,23 @@ class TrainingMixin(ServiceCore):
         with self.store.connect() as conn:
             profile = conn.execute(
                 "SELECT safety_mode, state_version FROM user_profile WHERE user_id = ?",
-                (user_id,),
+                (OWNER_ID,),
             ).fetchone()
             version = profile["state_version"] if profile else 0
 
             safety_eval = self._evaluate_user_safety_and_recovery(
-                conn, user_id, target_date=date, evidence_window_days=win_days
+                conn, target_date=date, evidence_window_days=win_days
             )
             safety_mode = safety_eval.safety_mode
             recovery_score = safety_eval.recovery_score if safety_eval.is_fresh else None
 
             prescription, _, _ = self._evaluate_training_prescription(
-                conn, user_id, date, equipment=equipment, target_duration_min=target_duration_min, evidence_window_days=win_days
+                conn, date, equipment=equipment, target_duration_min=target_duration_min, evidence_window_days=win_days
             )
 
             operation_id = f"op_read_{uuid.uuid4().hex[:12]}"
             data = {
-                "user_id": user_id,
+                "user_id": OWNER_ID,
                 "date": date,
                 "safety_mode": safety_mode,
                 "recovery_score": recovery_score,
@@ -441,7 +433,6 @@ class TrainingMixin(ServiceCore):
     def confirm_training_progression(
         self,
         *,
-        user_id: str,
         exercise_name: str,
         idempotency_key: str,
         confirmed_weight_kg: float | None = None,
@@ -456,7 +447,6 @@ class TrainingMixin(ServiceCore):
         """Confirm a verified double progression proposal for an exercise, recording revision chain."""
         try:
             ConfirmProgressionInput(
-                user_id=user_id,
                 exercise_name=exercise_name,
                 confirmed_weight_kg=confirmed_weight_kg,
                 confirmed_reps=confirmed_reps,
@@ -473,7 +463,7 @@ class TrainingMixin(ServiceCore):
 
         payload = {
             "action": "confirm_training_progression",
-            "user_id": user_id,
+            "user_id": OWNER_ID,
             "exercise_name": exercise_name,
             "confirmed_weight_kg": confirmed_weight_kg,
             "confirmed_reps": confirmed_reps,
@@ -488,12 +478,12 @@ class TrainingMixin(ServiceCore):
         now, operation_id = self._now(), f"op_{uuid.uuid4().hex}"
 
         with self.store.transaction() as conn:
-            existing = self._check_idempotency(conn, user_id, idempotency_key, "confirm_training_progression", payload)
+            existing = self._check_idempotency(conn, idempotency_key, "confirm_training_progression", payload)
             if existing:
                 return existing
 
-            self._ensure_profile_in_tx(conn, user_id, now)
-            profile = conn.execute("SELECT * FROM user_profile WHERE user_id = ?", (user_id,)).fetchone()
+            self._ensure_profile_in_tx(conn, now)
+            profile = conn.execute("SELECT * FROM user_profile WHERE user_id = ?", (OWNER_ID,)).fetchone()
             before_version = profile["state_version"]
 
             if expected_state_version is not None and expected_state_version != before_version:
@@ -507,7 +497,7 @@ class TrainingMixin(ServiceCore):
 
             # 1. Canonical Safety & Recovery Evaluation
             # Blocks restricted mode, 7-day deload, acute fatigue / sleep deficit / recovery deficit, and contraindications
-            safety_eval = self._evaluate_user_safety_and_recovery(conn, user_id, target_date=target_date)
+            safety_eval = self._evaluate_user_safety_and_recovery(conn, target_date=target_date)
             safety_eval.assert_progression_allowed(exercise_name=exercise_name)
 
             # 2. Check Evidence source records
@@ -522,7 +512,7 @@ class TrainingMixin(ServiceCore):
                 ).fetchone()
                 if not s_row:
                     raise ValidationError(f"Evidence source record '{s_id}' does not exist.")
-                if s_row["user_id"] != user_id:
+                if s_row["user_id"] != OWNER_ID:
                     raise ValidationError(f"Evidence source record '{s_id}' belongs to another user (cross-user evidence rejected).")
                 if s_row["status"] != "active":
                     raise ValidationError(f"Evidence source record '{s_id}' is not active (status='{s_row['status']}').")
@@ -537,7 +527,7 @@ class TrainingMixin(ServiceCore):
                     catalog_entry = v
                     break
             target_reps_max = catalog_entry.get("reps_max", 8) if catalog_entry else 8
-            expected_proposal = self._evaluate_exercise_progression(conn, user_id, exercise_name, target_reps_max, date=target_date)
+            expected_proposal = self._evaluate_exercise_progression(conn, exercise_name, target_reps_max, date=target_date)
             if not expected_proposal:
                 raise ValidationError(
                     f"No active qualifying progression proposal found for exercise '{exercise_name}'. "
@@ -574,7 +564,7 @@ class TrainingMixin(ServiceCore):
                    WHERE user_id = ? AND kind = 'progression_state' AND status = 'active'
                      AND LOWER(json_extract(body_json, '$.exercise_name')) = ?
                    ORDER BY created_at DESC LIMIT 1""",
-                (user_id, target_norm),
+                (OWNER_ID, target_norm),
             ).fetchone()
 
             parent_id = prev_row["record_id"] if prev_row else None
@@ -611,12 +601,12 @@ class TrainingMixin(ServiceCore):
                 """INSERT INTO domain_record(
                     record_id, user_id, kind, day, body_json, status, causation_id, parent_id, state_version, created_at
                 ) VALUES (?, ?, 'progression_state', ?, ?, 'active', ?, ?, ?, ?)""",
-                (record_id, user_id, now[:10], self.store.json(prog_body), operation_id, parent_id, after_version, now),
+                (record_id, OWNER_ID, now[:10], self.store.json(prog_body), operation_id, parent_id, after_version, now),
             )
 
             conn.execute(
                 "UPDATE user_profile SET state_version = ?, updated_at = ? WHERE user_id = ?",
-                (after_version, now, user_id),
+                (after_version, now, OWNER_ID),
             )
 
             data = {
@@ -640,7 +630,6 @@ class TrainingMixin(ServiceCore):
             self._record_operation(
                 conn,
                 operation_id=operation_id,
-                user_id=user_id,
                 idempotency_key=idempotency_key,
                 payload=payload,
                 action="confirm_training_progression",
@@ -653,7 +642,6 @@ class TrainingMixin(ServiceCore):
     def record_exercise_baseline(
         self,
         *,
-        user_id: str,
         exercise_name: str,
         idempotency_key: str,
         weight_kg: float | None = None,
@@ -666,7 +654,7 @@ class TrainingMixin(ServiceCore):
             raise ValidationError("At least one of weight_kg or reps must be provided.")
         payload = {
             "action": "record_exercise_baseline",
-            "user_id": user_id,
+            "user_id": OWNER_ID,
             "exercise_name": exercise_name,
             "weight_kg": weight_kg,
             "reps": reps,
@@ -676,11 +664,11 @@ class TrainingMixin(ServiceCore):
         }
         now, operation_id = self._now(), f"op_{uuid.uuid4().hex}"
         with self.store.transaction() as conn:
-            existing = self._check_idempotency(conn, user_id, idempotency_key, "record_exercise_baseline", payload)
+            existing = self._check_idempotency(conn, idempotency_key, "record_exercise_baseline", payload)
             if existing:
                 return existing
-            self._ensure_profile_in_tx(conn, user_id, now)
-            profile = conn.execute("SELECT * FROM user_profile WHERE user_id = ?", (user_id,)).fetchone()
+            self._ensure_profile_in_tx(conn, now)
+            profile = conn.execute("SELECT * FROM user_profile WHERE user_id = ?", (OWNER_ID,)).fetchone()
             before_version = profile["state_version"]
             if expected_state_version is not None and expected_state_version != before_version:
                 raise ConflictError(f"Expected version {expected_state_version}, current version is {before_version}")
@@ -691,7 +679,7 @@ class TrainingMixin(ServiceCore):
                    WHERE user_id = ? AND kind = 'progression_state' AND status = 'active'
                      AND LOWER(json_extract(body_json, '$.exercise_name')) = ?
                    ORDER BY created_at DESC LIMIT 1""",
-                (user_id, target_norm),
+                (OWNER_ID, target_norm),
             ).fetchone()
             parent_id = prev_row["record_id"] if prev_row else None
             if prev_row:
@@ -716,9 +704,9 @@ class TrainingMixin(ServiceCore):
                 """INSERT INTO domain_record(
                     record_id, user_id, kind, day, body_json, status, causation_id, parent_id, state_version, created_at
                 ) VALUES (?, ?, 'progression_state', ?, ?, 'active', ?, ?, ?, ?)""",
-                (record_id, user_id, now[:10], self.store.json(prog_body), operation_id, parent_id, after_version, now),
+                (record_id, OWNER_ID, now[:10], self.store.json(prog_body), operation_id, parent_id, after_version, now),
             )
-            conn.execute("UPDATE user_profile SET state_version = ?, updated_at = ? WHERE user_id = ?", (after_version, now, user_id))
+            conn.execute("UPDATE user_profile SET state_version = ?, updated_at = ? WHERE user_id = ?", (after_version, now, OWNER_ID))
             data = {
                 "record_id": record_id,
                 "exercise_name": exercise_name,
@@ -732,7 +720,7 @@ class TrainingMixin(ServiceCore):
             }
             response = self._response(operation_id, "success", data, after_version)
             self._record_operation(
-                conn, operation_id=operation_id, user_id=user_id, idempotency_key=idempotency_key,
+                conn, operation_id=operation_id, idempotency_key=idempotency_key,
                 payload=payload, action="record_exercise_baseline", before_version=before_version,
                 response=response, now=now,
             )
@@ -741,7 +729,6 @@ class TrainingMixin(ServiceCore):
     def substitute_exercise(
         self,
         *,
-        user_id: str,
         original_exercise: str,
         equipment: list[str] | None = None,
         discomfort_joint: str | None = None,
@@ -750,7 +737,6 @@ class TrainingMixin(ServiceCore):
         """Support on-the-fly exercise substitution preserving movement pattern and volume."""
         try:
             SubstituteExerciseInput(
-                user_id=user_id,
                 original_exercise=original_exercise,
                 equipment=equipment or [],
                 discomfort_joint=discomfort_joint,
@@ -762,7 +748,7 @@ class TrainingMixin(ServiceCore):
         with self.store.connect() as conn:
             profile = conn.execute(
                 "SELECT constraints_json, goals_json, state_version FROM user_profile WHERE user_id = ?",
-                (user_id,),
+                (OWNER_ID,),
             ).fetchone()
             version = profile["state_version"] if profile else 0
 
@@ -861,7 +847,6 @@ class TrainingMixin(ServiceCore):
     def complete_workout(
         self,
         *,
-        user_id: str,
         date: str,
         idempotency_key: str,
         completed_exercises: list[dict[str, Any]] | None = None,
@@ -872,7 +857,6 @@ class TrainingMixin(ServiceCore):
         """Workout completion check-in with red-flag detection and state transition."""
         try:
             CompleteWorkoutInput(
-                user_id=user_id,
                 date=date,
                 idempotency_key=idempotency_key,
                 completed_exercises=completed_exercises or [],
@@ -885,7 +869,7 @@ class TrainingMixin(ServiceCore):
 
         payload = {
             "action": "complete_workout",
-            "user_id": user_id,
+            "user_id": OWNER_ID,
             "date": date,
             "completed_exercises": completed_exercises or [],
             "session_rpe": session_rpe,
@@ -895,14 +879,14 @@ class TrainingMixin(ServiceCore):
         now, operation_id = self._now(), f"op_{uuid.uuid4().hex}"
 
         with self.store.transaction() as conn:
-            existing = self._check_idempotency(conn, user_id, idempotency_key, "complete_workout", payload)
+            existing = self._check_idempotency(conn, idempotency_key, "complete_workout", payload)
             if existing:
                 return existing
 
-            self._ensure_profile_in_tx(conn, user_id, now)
+            self._ensure_profile_in_tx(conn, now)
             profile = conn.execute(
                 "SELECT safety_flags_json, safety_mode, state_version FROM user_profile WHERE user_id = ?",
-                (user_id,),
+                (OWNER_ID,),
             ).fetchone()
             before_version = profile["state_version"]
             safety_flags = json.loads(profile["safety_flags_json"])
@@ -920,7 +904,7 @@ class TrainingMixin(ServiceCore):
                         safety_flags.append(fl)
                 conn.execute(
                     "UPDATE user_profile SET safety_mode = 'restricted', safety_flags_json = ? WHERE user_id = ?",
-                    (self.store.json(safety_flags), user_id),
+                    (self.store.json(safety_flags), OWNER_ID),
                 )
                 warnings.append(
                     f"SAFETY_RESTRICTED: Acute red-flag symptom detected ({', '.join(detected_flags)}). System locked into Restricted Mode."
@@ -940,12 +924,12 @@ class TrainingMixin(ServiceCore):
                 """INSERT INTO domain_record(
                     record_id, user_id, kind, day, body_json, status, causation_id, state_version, created_at
                 ) VALUES (?, ?, 'workout', ?, ?, 'active', ?, ?, ?)""",
-                (record_id, user_id, date, body_json, operation_id, after_version, now),
+                (record_id, OWNER_ID, date, body_json, operation_id, after_version, now),
             )
 
             conn.execute(
                 "UPDATE user_profile SET state_version = ?, updated_at = ? WHERE user_id = ?",
-                (after_version, now, user_id),
+                (after_version, now, OWNER_ID),
             )
 
             data = {
@@ -966,7 +950,6 @@ class TrainingMixin(ServiceCore):
             self._record_operation(
                 conn,
                 operation_id=operation_id,
-                user_id=user_id,
                 idempotency_key=idempotency_key,
                 payload=payload,
                 action="complete_workout",

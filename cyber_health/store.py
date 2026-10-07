@@ -18,6 +18,27 @@ class SchemaVersionError(RuntimeError):
     """The database was migrated by a newer Cyber Health release."""
 
 
+class LegacyPartitionError(RuntimeError):
+    """The database still holds facts for identities other than the single owner."""
+
+
+PARTITIONED_TABLES = ("user_profile", "meal_log", "schedule_event", "operation_log", "domain_record", "memory_outbox")
+LEGACY_PARTITION_MESSAGE = (
+    "Legacy user_id partitions found in the Cyber Health database. "
+    "Back up and migrate this database using 'cyber-health migrate-owner' before starting."
+)
+
+
+def has_foreign_partitions(conn: sqlite3.Connection) -> bool:
+    """True when any fact belongs to an identity other than ``SINGLE_USER_ID``."""
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    return any(
+        conn.execute(f"SELECT 1 FROM {table} WHERE user_id <> ? LIMIT 1", (SINGLE_USER_ID,)).fetchone()
+        for table in PARTITIONED_TABLES
+        if table in tables
+    )
+
+
 class ClosingConnection(sqlite3.Connection):
     """The sqlite context manager commits/rolls back but otherwise leaks handles."""
 
@@ -142,6 +163,12 @@ class SQLiteStore:
                 """
             )
             self._apply_migrations(conn)
+
+    def assert_single_owner(self) -> None:
+        """Refuse to serve a database whose other identities would be silently hidden."""
+        with self.connect() as conn:
+            if has_foreign_partitions(conn):
+                raise LegacyPartitionError(LEGACY_PARTITION_MESSAGE)
 
     @staticmethod
     def _apply_migrations(conn: sqlite3.Connection) -> None:

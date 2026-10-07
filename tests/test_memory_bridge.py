@@ -109,7 +109,7 @@ class MemoryBridgeFixture(unittest.TestCase):
         service = CyberHealthService(Path(self.temp_dir.name) / "health.sqlite3", memory_provider=provider)
         with self.assertRaises(ValidationError):
             service.memory_action(
-                user_id="qiuqiquan", action_type="action", confirmed=False,
+                action_type="action", confirmed=False,
                 payload={"candidate_id": candidate_id, "action_type": "confirm"},
                 idempotency_key="no-user-confirmation",
             )

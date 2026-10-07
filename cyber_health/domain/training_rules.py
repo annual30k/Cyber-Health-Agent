@@ -8,7 +8,7 @@ import re
 from datetime import datetime
 from typing import Any
 
-from .base import _MALFORMED_RECORD_ERRORS, ServiceCore
+from .base import _MALFORMED_RECORD_ERRORS, OWNER_ID, ServiceCore
 from .catalog import EXERCISE_CATALOG
 from .safety import SafetyRecoveryEvaluation
 
@@ -16,7 +16,7 @@ from .safety import SafetyRecoveryEvaluation
 class TrainingRulesMixin(ServiceCore):
     """Safety, recovery, progression and prescription rules behind training plans."""
 
-    def _resolve_exercise_baseline_weight(self, conn: Any, user_id: str, exercise_name: str) -> float | None:
+    def _resolve_exercise_baseline_weight(self, conn: Any, exercise_name: str) -> float | None:
         """Resolve confirmed or historical baseline load for an exercise without fabricating values."""
         target_norm = exercise_name.strip().lower()
         # 1. Check confirmed progression state
@@ -25,7 +25,7 @@ class TrainingRulesMixin(ServiceCore):
                WHERE user_id = ? AND kind = 'progression_state' AND status = 'active'
                  AND LOWER(json_extract(body_json, '$.exercise_name')) = ?
                ORDER BY created_at DESC LIMIT 1""",
-            (user_id, target_norm),
+            (OWNER_ID, target_norm),
         ).fetchone()
         if prog_row:
             try:
@@ -40,7 +40,7 @@ class TrainingRulesMixin(ServiceCore):
             """SELECT body_json, kind FROM domain_record
                WHERE user_id = ? AND kind IN ('workout', 'workout_log') AND status = 'active'
                ORDER BY day DESC, created_at DESC LIMIT 10""",
-            (user_id,),
+            (OWNER_ID,),
         ).fetchall()
         for row in wo_rows:
             try:
@@ -62,7 +62,6 @@ class TrainingRulesMixin(ServiceCore):
     def _evaluate_user_safety_and_recovery(
         self,
         conn: Any,
-        user_id: str,
         target_date: str | None = None,
         evidence_window_days: int | None = None,
     ) -> SafetyRecoveryEvaluation:
@@ -78,7 +77,7 @@ class TrainingRulesMixin(ServiceCore):
         """
         profile = conn.execute(
             "SELECT safety_mode, deload_until, safety_flags_json, constraints_json, goals_json, timezone, state_version FROM user_profile WHERE user_id = ?",
-            (user_id,),
+            (OWNER_ID,),
         ).fetchone()
 
         safety_mode = profile["safety_mode"] if profile else "normal"
@@ -136,7 +135,7 @@ class TrainingRulesMixin(ServiceCore):
             """SELECT record_id, day, body_json, created_at FROM domain_record
                WHERE user_id = ? AND kind = 'daily_state' AND day <= ? AND status = 'active'
                ORDER BY day DESC, created_at DESC LIMIT 1""",
-            (user_id, resolved_date),
+            (OWNER_ID, resolved_date),
         ).fetchone()
 
         has_daily_state = bool(latest_ds)
@@ -234,7 +233,6 @@ class TrainingRulesMixin(ServiceCore):
             state_evidence = "unrecorded_recent_state"
 
         return SafetyRecoveryEvaluation(
-            user_id=user_id,
             target_date=resolved_date,
             timezone=tz_name,
             safety_mode=safety_mode,
@@ -267,7 +265,6 @@ class TrainingRulesMixin(ServiceCore):
     def _evaluate_exercise_progression(
         self,
         conn: Any,
-        user_id: str,
         exercise_name: str,
         target_reps_max: int,
         date: str | None = None,
@@ -289,7 +286,7 @@ class TrainingRulesMixin(ServiceCore):
                 break
 
         # Resolve eval_date to user's local date
-        row = conn.execute("SELECT timezone FROM user_profile WHERE user_id = ?", (user_id,)).fetchone()
+        row = conn.execute("SELECT timezone FROM user_profile WHERE user_id = ?", (OWNER_ID,)).fetchone()
         tz_name = row["timezone"] if row and row["timezone"] else "Asia/Shanghai"
         if date is None:
             eval_date = self._parse_day_in_timezone(self._now(), tz_name)
@@ -299,7 +296,7 @@ class TrainingRulesMixin(ServiceCore):
             eval_date = date[:10]
 
         # Shared Safety & Recovery Gate: no progression suggestions under restricted, deload, or fatigue
-        safety_eval = self._evaluate_user_safety_and_recovery(conn, user_id, target_date=eval_date)
+        safety_eval = self._evaluate_user_safety_and_recovery(conn, target_date=eval_date)
         if safety_eval.is_restricted or safety_eval.is_deload or safety_eval.is_fatigue_or_sleep_deficit:
             return None
 
@@ -314,7 +311,7 @@ class TrainingRulesMixin(ServiceCore):
                  AND day <= ?
                ORDER BY day DESC, created_at DESC
                LIMIT 100""",
-            (user_id, eval_date),
+            (OWNER_ID, eval_date),
         ).fetchall()
 
         required_sets = (catalog_entry.get("default_sets") or catalog_entry.get("sets", 3)) if catalog_entry else 3
@@ -506,7 +503,7 @@ class TrainingRulesMixin(ServiceCore):
 
         evidence_ids = sorted(set(s1["record_ids"] + s2["record_ids"]))
         exercise_slug = re.sub(r"[^a-z0-9_]+", "_", target_norm).strip("_")
-        sig_payload = f"{user_id}:{target_norm}:{','.join(evidence_ids)}:{suggested_weight}:{suggested_reps}"
+        sig_payload = f"{OWNER_ID}:{target_norm}:{','.join(evidence_ids)}:{suggested_weight}:{suggested_reps}"
         proposal_sig = hashlib.sha256(sig_payload.encode("utf-8")).hexdigest()[:16]
         proposal_id = f"prop_{exercise_slug}_{proposal_sig}"
 
@@ -542,7 +539,6 @@ class TrainingRulesMixin(ServiceCore):
     def _evaluate_training_prescription(
         self,
         conn: Any,
-        user_id: str,
         date: str,
         equipment: list[str] | None = None,
         target_duration_min: int = 45,
@@ -555,7 +551,7 @@ class TrainingRulesMixin(ServiceCore):
             (prescription_dict, summary_plan_text, safety_alert_text)
         """
         safety_eval = self._evaluate_user_safety_and_recovery(
-            conn, user_id, target_date=date, evidence_window_days=evidence_window_days
+            conn, target_date=date, evidence_window_days=evidence_window_days
         )
 
         has_knee_constraint = "knee" in safety_eval.active_constraints
@@ -590,7 +586,7 @@ class TrainingRulesMixin(ServiceCore):
             rep_target = custom_reps if custom_reps is not None else reps_max
             rest_sec = info.get("rest_seconds", 90)
 
-            baseline_w = self._resolve_exercise_baseline_weight(conn, user_id, ex_name)
+            baseline_w = self._resolve_exercise_baseline_weight(conn, ex_name)
             if baseline_w is not None:
                 weight_guidance = f"已知负荷基准：{baseline_w}kg。"
             else:
@@ -825,7 +821,7 @@ class TrainingRulesMixin(ServiceCore):
         progression_suggestions: list[dict[str, Any]] = []
         for ex in exercises:
             sugg = self._evaluate_exercise_progression(
-                conn, user_id, ex["name"], target_reps_max=ex["target_reps_max"], date=date
+                conn, ex["name"], target_reps_max=ex["target_reps_max"], date=date
             )
             if sugg:
                 progression_suggestions.append(sugg)
@@ -874,7 +870,6 @@ class TrainingRulesMixin(ServiceCore):
     def _determine_safe_workout_plan(
         self,
         conn: Any,
-        user_id: str,
         date: str,
         profile: Any,
     ) -> tuple[str, str, str | None, dict[str, Any]]:
@@ -889,7 +884,6 @@ class TrainingRulesMixin(ServiceCore):
             target_duration = 45
         prescription, summary, alert = self._evaluate_training_prescription(
             conn,
-            user_id,
             date,
             equipment=equipment,
             target_duration_min=target_duration,

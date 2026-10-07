@@ -10,19 +10,19 @@ from typing import Any
 
 from ..errors import ConflictError, ValidationError
 from ..models import DailyReviewInput, PlanTomorrowInput
-from .base import _MALFORMED_RECORD_ERRORS, ServiceCore
+from .base import _MALFORMED_RECORD_ERRORS, OWNER_ID, ServiceCore
 from .catalog import RED_FLAG_KEYWORDS
 
 
 class ReviewMixin(ServiceCore):
     """Nightly fact collection, daily review and tomorrow's plan."""
 
-    def _daily_review_facts(self, conn: Any, user_id: str, day: str, tz_name: str) -> dict[str, Any]:
+    def _daily_review_facts(self, conn: Any, day: str, tz_name: str) -> dict[str, Any]:
         """Build a pure snapshot of facts the nightly agent must verify before finalizing."""
         meal_rows = conn.execute(
             """SELECT meal_type, occurred_at FROM meal_log
                WHERE user_id = ? AND status = 'active'""",
-            (user_id,),
+            (OWNER_ID,),
         ).fetchall()
         recorded_meal_types = sorted(
             {
@@ -39,7 +39,7 @@ class ReviewMixin(ServiceCore):
                WHERE user_id = ? AND kind IN ('workout', 'workout_log')
                  AND day = ? AND status = 'active'
                ORDER BY created_at ASC""",
-            (user_id, day),
+            (OWNER_ID, day),
         ).fetchall()
         sessions: list[dict[str, Any]] = []
         completion_rates: list[float] = []
@@ -98,7 +98,6 @@ class ReviewMixin(ServiceCore):
     def daily_review(
         self,
         *,
-        user_id: str,
         date: str,
         idempotency_key: str,
         user_notes: str | None = None,
@@ -106,7 +105,6 @@ class ReviewMixin(ServiceCore):
     ) -> dict[str, Any]:
         try:
             DailyReviewInput(
-                user_id=user_id,
                 date=date,
                 idempotency_key=idempotency_key,
                 user_notes=user_notes,
@@ -117,7 +115,7 @@ class ReviewMixin(ServiceCore):
 
         payload = {
             "action": "daily_review",
-            "user_id": user_id,
+            "user_id": OWNER_ID,
             "date": date,
             "user_notes": user_notes,
             "expected_state_version": expected_state_version,
@@ -126,13 +124,13 @@ class ReviewMixin(ServiceCore):
 
         with self.store.transaction() as conn:
             existing = self._check_idempotency(
-                conn, user_id, idempotency_key, "daily_review", payload, recompute_when_stale=True
+                conn, idempotency_key, "daily_review", payload, recompute_when_stale=True
             )
             if existing:
                 return existing
 
-            self._ensure_profile_in_tx(conn, user_id, now)
-            profile = conn.execute("SELECT * FROM user_profile WHERE user_id = ?", (user_id,)).fetchone()
+            self._ensure_profile_in_tx(conn, now)
+            profile = conn.execute("SELECT * FROM user_profile WHERE user_id = ?", (OWNER_ID,)).fetchone()
             before_version = profile["state_version"]
             tz_name = profile["timezone"]
 
@@ -151,13 +149,13 @@ class ReviewMixin(ServiceCore):
                             flags.append(rf)
                     conn.execute(
                         "UPDATE user_profile SET safety_mode = 'restricted', safety_flags_json = ? WHERE user_id = ?",
-                        (self.store.json(flags), user_id),
+                        (self.store.json(flags), OWNER_ID),
                     )
-                    profile = conn.execute("SELECT * FROM user_profile WHERE user_id = ?", (user_id,)).fetchone()
+                    profile = conn.execute("SELECT * FROM user_profile WHERE user_id = ?", (OWNER_ID,)).fetchone()
 
-            totals = self._today_totals(conn, user_id, date, tz_name, include_statistical=True)
+            totals = self._today_totals(conn, date, tz_name, include_statistical=True)
             is_missing = totals["meal_count"] == 0
-            fact_collection = self._daily_review_facts(conn, user_id, date, tz_name)
+            fact_collection = self._daily_review_facts(conn, date, tz_name)
 
             if is_missing:
                 summary = "今日未记录饮食数据。系统未假设断食，建议稍后补记或直接开启明日预案。"
@@ -184,7 +182,7 @@ class ReviewMixin(ServiceCore):
 
             tomorrow_date = (datetime.strptime(date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
             workout_plan, min_plan, safety_alert, training_plan = self._determine_safe_workout_plan(
-                conn, user_id, tomorrow_date, profile
+                conn, tomorrow_date, profile
             )
 
             goals = json.loads(profile["goals_json"])
@@ -347,7 +345,7 @@ class ReviewMixin(ServiceCore):
             after_version = before_version + 1
             conn.execute(
                 "UPDATE user_profile SET state_version = ?, updated_at = ? WHERE user_id = ?",
-                (after_version, now, user_id),
+                (after_version, now, OWNER_ID),
             )
 
             review_id = f"rev_{uuid.uuid4().hex}"
@@ -369,7 +367,7 @@ class ReviewMixin(ServiceCore):
                 """INSERT INTO domain_record(
                     record_id, user_id, kind, day, body_json, status, causation_id, state_version, created_at
                 ) VALUES (?, ?, 'daily_review', ?, ?, 'active', ?, ?, ?)""",
-                (review_id, user_id, date, self.store.json(review_body), operation_id, after_version, now),
+                (review_id, OWNER_ID, date, self.store.json(review_body), operation_id, after_version, now),
             )
 
             # Link previous draft plan to establish revision lineage
@@ -377,7 +375,7 @@ class ReviewMixin(ServiceCore):
                 """SELECT record_id FROM domain_record
                    WHERE user_id = ? AND kind = 'plan' AND day = ? AND status != 'deleted'
                    ORDER BY created_at DESC LIMIT 1""",
-                (user_id, tomorrow_date),
+                (OWNER_ID, tomorrow_date),
             ).fetchone()
             parent_plan_id = prev_plan["record_id"] if prev_plan else None
             if parent_plan_id:
@@ -391,12 +389,12 @@ class ReviewMixin(ServiceCore):
                 """INSERT INTO domain_record(
                     record_id, user_id, kind, day, body_json, parent_id, status, causation_id, state_version, created_at
                 ) VALUES (?, ?, 'plan', ?, ?, ?, 'draft', ?, ?, ?)""",
-                (plan_id, user_id, tomorrow_date, self.store.json(tomorrow_draft), parent_plan_id, operation_id, after_version, now),
+                (plan_id, OWNER_ID, tomorrow_date, self.store.json(tomorrow_draft), parent_plan_id, operation_id, after_version, now),
             )
 
             # Evaluate genuine maintenance due-work without spamming fake memory candidates
             now_dt = datetime.fromisoformat(now) if isinstance(now, str) else self._utcnow()
-            due_info = self._calculate_maintenance_due(conn, user_id, now_dt, day=date)
+            due_info = self._calculate_maintenance_due(conn, now_dt, day=date)
             maint_rec = due_info["due"]
             maint_reason = due_info["reason"]
             maint_key = due_info["maintenance_key"]
@@ -448,7 +446,6 @@ class ReviewMixin(ServiceCore):
             self._record_operation(
                 conn,
                 operation_id=operation_id,
-                user_id=user_id,
                 idempotency_key=idempotency_key,
                 payload=payload,
                 action="daily_review",
@@ -461,7 +458,6 @@ class ReviewMixin(ServiceCore):
     def plan_tomorrow(
         self,
         *,
-        user_id: str,
         date: str,
         idempotency_key: str,
         commit: bool = False,
@@ -469,7 +465,6 @@ class ReviewMixin(ServiceCore):
     ) -> dict[str, Any]:
         try:
             PlanTomorrowInput(
-                user_id=user_id,
                 date=date,
                 idempotency_key=idempotency_key,
                 commit=commit,
@@ -480,7 +475,7 @@ class ReviewMixin(ServiceCore):
 
         payload = {
             "action": "plan_tomorrow",
-            "user_id": user_id,
+            "user_id": OWNER_ID,
             "date": date,
             "commit": commit,
             "expected_state_version": expected_state_version,
@@ -489,13 +484,13 @@ class ReviewMixin(ServiceCore):
 
         with self.store.transaction() as conn:
             existing = self._check_idempotency(
-                conn, user_id, idempotency_key, "plan_tomorrow", payload, recompute_when_stale=True
+                conn, idempotency_key, "plan_tomorrow", payload, recompute_when_stale=True
             )
             if existing:
                 return existing
 
-            self._ensure_profile_in_tx(conn, user_id, now)
-            profile = conn.execute("SELECT * FROM user_profile WHERE user_id = ?", (user_id,)).fetchone()
+            self._ensure_profile_in_tx(conn, now)
+            profile = conn.execute("SELECT * FROM user_profile WHERE user_id = ?", (OWNER_ID,)).fetchone()
             before_version = profile["state_version"]
 
             if expected_state_version is not None and expected_state_version != before_version:
@@ -505,7 +500,7 @@ class ReviewMixin(ServiceCore):
 
             # Centralized safe plan generation
             workout_plan, min_plan, safety_alert, training_plan = self._determine_safe_workout_plan(
-                conn, user_id, date, profile
+                conn, date, profile
             )
 
             goals = json.loads(profile["goals_json"])
@@ -541,7 +536,7 @@ class ReviewMixin(ServiceCore):
                 """SELECT record_id FROM domain_record
                    WHERE user_id = ? AND kind = 'plan' AND day = ? AND status != 'deleted'
                    ORDER BY created_at DESC LIMIT 1""",
-                (user_id, date),
+                (OWNER_ID, date),
             ).fetchone()
             parent_plan_id = prev_plan["record_id"] if prev_plan else None
             if parent_plan_id:
@@ -553,7 +548,7 @@ class ReviewMixin(ServiceCore):
             after_version = before_version + 1
             conn.execute(
                 "UPDATE user_profile SET state_version = ?, updated_at = ? WHERE user_id = ?",
-                (after_version, now, user_id),
+                (after_version, now, OWNER_ID),
             )
 
             plan_id = f"plan_{uuid.uuid4().hex}"
@@ -561,7 +556,7 @@ class ReviewMixin(ServiceCore):
                 """INSERT INTO domain_record(
                     record_id, user_id, kind, day, body_json, parent_id, status, causation_id, state_version, created_at
                 ) VALUES (?, ?, 'plan', ?, ?, ?, ?, ?, ?, ?)""",
-                (plan_id, user_id, date, self.store.json(plan_data), parent_plan_id, new_status, operation_id, after_version, now),
+                (plan_id, OWNER_ID, date, self.store.json(plan_data), parent_plan_id, new_status, operation_id, after_version, now),
             )
 
             data = {
@@ -580,7 +575,6 @@ class ReviewMixin(ServiceCore):
             self._record_operation(
                 conn,
                 operation_id=operation_id,
-                user_id=user_id,
                 idempotency_key=idempotency_key,
                 payload=payload,
                 action="plan_tomorrow",

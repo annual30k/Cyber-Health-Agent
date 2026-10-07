@@ -21,7 +21,6 @@ class ActiveMemorySuggestionTests(unittest.TestCase):
     def test_arbitrary_meal_type_and_food_name_can_form_a_suggestion(self) -> None:
         for index, day in enumerate(("2026-09-01", "2026-09-04", "2026-09-09")):
             self.service.log_meal(
-                user_id="u_generic",
                 occurred_at=f"{day}T15:00:00+08:00",
                 meal_type="加餐",
                 foods=[{"name": "紫薯酸奶"}],
@@ -30,14 +29,13 @@ class ActiveMemorySuggestionTests(unittest.TestCase):
                 idempotency_key=f"meal-{index}",
             )
 
-        before = self.service.get_profile("u_generic")
+        before = self.service.get_profile()
         result = self.service.get_memory_suggestions(
-            user_id="u_generic",
             date="2026-09-10",
             window_days=30,
             limit=3,
         )
-        after = self.service.get_profile("u_generic")
+        after = self.service.get_profile()
 
         self.assertEqual(result["status"], "success")
         self.assertEqual(len(result["data"]["suggestions"]), 1)
@@ -57,7 +55,6 @@ class ActiveMemorySuggestionTests(unittest.TestCase):
 
     def test_single_fact_does_not_trigger_and_suggestion_is_pure_read(self) -> None:
         self.service.log_meal(
-            user_id="u_single",
             occurred_at="2026-09-09T15:00:00+08:00",
             meal_type="夜宵",
             foods=[{"name": "临时点心"}],
@@ -65,12 +62,10 @@ class ActiveMemorySuggestionTests(unittest.TestCase):
             kcal_high=150,
             idempotency_key="single-meal",
         )
-        before = self.service.get_profile("u_single")
+        before = self.service.get_profile()
         result = self.service.get_memory_suggestions(
-            user_id="u_single",
-            date="2026-09-10",
-        )
-        after = self.service.get_profile("u_single")
+            date="2026-09-10")
+        after = self.service.get_profile()
 
         self.assertEqual(result["data"]["suggestions"], [])
         self.assertEqual(before["state_version"], after["state_version"])
@@ -78,7 +73,6 @@ class ActiveMemorySuggestionTests(unittest.TestCase):
     def test_arbitrary_activity_type_can_form_a_workout_suggestion(self) -> None:
         for index, day in enumerate(("2026-09-01", "2026-09-05", "2026-09-09")):
             self.service.log_workout(
-                user_id="u_workout",
                 date=day,
                 idempotency_key=f"workout-{index}",
                 activity_summary={
@@ -90,7 +84,6 @@ class ActiveMemorySuggestionTests(unittest.TestCase):
             )
 
         result = self.service.get_memory_suggestions(
-            user_id="u_workout",
             date="2026-09-10",
             limit=3,
         )
@@ -102,14 +95,12 @@ class ActiveMemorySuggestionTests(unittest.TestCase):
     def test_planned_only_workout_is_not_treated_as_completed(self) -> None:
         for index, day in enumerate(("2026-09-01", "2026-09-05", "2026-09-09")):
             self.service.log_workout(
-                user_id="u_planned_only",
                 date=day,
                 idempotency_key=f"planned-{index}",
                 planned_exercises=["用户计划动作"],
             )
 
         result = self.service.get_memory_suggestions(
-            user_id="u_planned_only",
             date="2026-09-10",
             limit=3,
         )
@@ -118,7 +109,6 @@ class ActiveMemorySuggestionTests(unittest.TestCase):
     def test_daily_proposal_budget_suppresses_new_pattern_suggestions(self) -> None:
         for index, day in enumerate(("2026-09-01", "2026-09-05", "2026-09-09")):
             self.service.log_meal(
-                user_id="u_budget",
                 occurred_at=f"{day}T12:00:00+08:00",
                 meal_type="自定义餐别",
                 foods=[{"name": "自定义食物"}],
@@ -128,14 +118,12 @@ class ActiveMemorySuggestionTests(unittest.TestCase):
             )
         for index in range(3):
             self.service.memory_action(
-                user_id="u_budget",
                 action_type="propose",
                 idempotency_key=f"budget-proposal-{index}",
                 payload={"candidate_key": f"manual-{index}", "content": "用户明确提出的候选"},
             )
 
         result = self.service.get_memory_suggestions(
-            user_id="u_budget",
             date="2026-09-10",
             limit=3,
         )

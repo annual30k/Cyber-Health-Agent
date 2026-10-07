@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from cyber_health import CyberHealthService, ValidationError
+from test_support import OWNER
 
 
 class MockMemoryProvider:
@@ -34,14 +35,13 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
 
     def test_get_remaining_calories_unconfigured_and_configured(self) -> None:
         # 1. Unconfigured goals
-        res_unconf = self.service.get_remaining_calories(user_id="u1", date="2026-09-04")
+        res_unconf = self.service.get_remaining_calories(date="2026-09-04")
         self.assertEqual(res_unconf["status"], "success")
         self.assertIsNone(res_unconf["remaining_ranges"])
         self.assertIn("unconfigured", res_unconf["suggestion"])
 
         # 2. Configure goals: 2000-2200 kcal, 140-160g protein
         self.service.update_profile(
-            user_id="u1",
             idempotency_key="up-1",
             goals={
                 "target_kcal_low": 2000,
@@ -52,14 +52,13 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
         )
 
         # 3. Query before meals
-        res_before = self.service.get_remaining_calories(user_id="u1", date="2026-09-04")
+        res_before = self.service.get_remaining_calories(date="2026-09-04")
         self.assertEqual(res_before["status"], "success")
         self.assertEqual(res_before["priority_nutrients"], ["protein"])
         self.assertIn("140-160g protein", res_before["suggestion"])
 
         # 4. Log high-protein meal
         self.service.log_meal(
-            user_id="u1",
             occurred_at="2026-09-04T12:00:00+08:00",
             meal_type="lunch",
             foods=[{"name": "Chicken breast", "amount_g": {"low": 300, "high": 350}}],
@@ -71,7 +70,7 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
         )
 
         # 5. Protein goal achieved
-        res_after = self.service.get_remaining_calories(user_id="u1", date="2026-09-04")
+        res_after = self.service.get_remaining_calories(date="2026-09-04")
         self.assertEqual(res_after["priority_nutrients"], ["calories"])
         self.assertIn("Protein target met", res_after["suggestion"])
 
@@ -89,7 +88,6 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
 
         # Log local short-term meal
         service.log_meal(
-            user_id="u2",
             occurred_at="2026-09-04T08:00:00+08:00",
             meal_type="breakfast",
             foods=[{"name": "Whey protein shake", "amount_g": {"low": 40, "high": 50}}],
@@ -101,7 +99,7 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
         )
 
         # Dual-layer query for 'protein'
-        res = service.query_memory(user_id="u2", query="protein", limit=5)
+        res = service.query_memory(query="protein", limit=5)
         self.assertEqual(res["status"], "success")
         self.assertTrue(res["obsidian_provider_connected"])
         self.assertGreaterEqual(res["sqlite_facts_count"], 1)
@@ -110,14 +108,13 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
         self.assertIsNone(res["safety_advisory"])
 
         # Query with acute cardiovascular red-flag symptom
-        res_flag = service.query_memory(user_id="u2", query="severe chest pain while training", limit=5)
+        res_flag = service.query_memory(query="severe chest pain while training", limit=5)
         self.assertIsNotNone(res_flag["safety_advisory"])
         self.assertIn("SAFETY_RESTRICTED", res_flag["safety_advisory"])
 
     def test_maintain_memory_local_trend_consolidation(self) -> None:
         # Log a meal in the past (40 days ago)
         self.service.log_meal(
-            user_id="u3",
             occurred_at="2026-07-20T12:00:00+08:00",
             meal_type="lunch",
             foods=[{"name": "Rice and beef", "amount_g": {"low": 200, "high": 250}}],
@@ -129,14 +126,14 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
         )
 
         # Run maintain_memory with prune_days=30
-        res = self.service.maintain_memory(user_id="u3", idempotency_key="maint-trend-01", prune_days=30)
+        res = self.service.maintain_memory(idempotency_key="maint-trend-01", prune_days=30)
         self.assertIn("consolidated_trends", res["data"])
         self.assertGreaterEqual(res["data"]["consolidated_trends"], 1)
 
         # Verify weekly trend record is persisted in SQLite domain_record
         with self.service.store.connect() as conn:
             trend_row = conn.execute(
-                "SELECT * FROM domain_record WHERE user_id = 'u3' AND kind = 'weekly_nutrition_trend'",
+                "SELECT * FROM domain_record WHERE user_id = 'owner' AND kind = 'weekly_nutrition_trend'",
             ).fetchone()
             self.assertIsNotNone(trend_row)
             self.assertIn("aggregated_meals", trend_row["body_json"])
@@ -147,7 +144,7 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
             for i in range(10)
         ])
         service = CyberHealthService(self.db_path, memory_provider=mock_prov)
-        res = service.query_memory(user_id="u_ev", query="protein", limit=3)
+        res = service.query_memory(query="protein", limit=3)
         self.assertLessEqual(len(res["obsidian_memories"]), 3)
         for item in res["obsidian_memories"]:
             self.assertEqual(item["confirmation_status"], "unconfirmed")
@@ -159,7 +156,7 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
                 return "unexpected string instead of dict"
 
         service = CyberHealthService(self.db_path, memory_provider=MalformedProvider())
-        res = service.query_memory(user_id="u_mal", query="protein", limit=5)
+        res = service.query_memory(query="protein", limit=5)
         self.assertFalse(res["obsidian_provider_connected"])
         self.assertEqual(len(res["obsidian_memories"]), 0)
         self.assertTrue(any("PROVIDER_MALFORMED_RESPONSE" in w for w in res["warnings"]))
@@ -171,7 +168,6 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
         """
         # Day 1: 2026-07-20 (Monday) - 2 meals: 500 kcal and 700 kcal -> Day total: 1200 kcal
         self.service.log_meal(
-            user_id="u_trend",
             occurred_at="2026-07-20T08:00:00+08:00",
             meal_type="breakfast",
             foods=[{"name": "Oatmeal"}],
@@ -182,7 +178,6 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
             idempotency_key="trend-meal-1",
         )
         self.service.log_meal(
-            user_id="u_trend",
             occurred_at="2026-07-20T18:00:00+08:00",
             meal_type="dinner",
             foods=[{"name": "Steak"}],
@@ -194,7 +189,6 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
         )
         # Day 2: 2026-07-21 (Tuesday) - 1 meal: 800 kcal -> Day total: 800 kcal
         self.service.log_meal(
-            user_id="u_trend",
             occurred_at="2026-07-21T12:00:00+08:00",
             meal_type="lunch",
             foods=[{"name": "Chicken rice"}],
@@ -205,12 +199,12 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
             idempotency_key="trend-meal-3",
         )
 
-        res = self.service.maintain_memory(user_id="u_trend", idempotency_key="maint-trend-calc", prune_days=30)
+        res = self.service.maintain_memory(idempotency_key="maint-trend-calc", prune_days=30)
         self.assertGreaterEqual(res["data"]["consolidated_trends"], 1)
 
         with self.service.store.connect() as conn:
             row = conn.execute(
-                "SELECT body_json FROM domain_record WHERE user_id = 'u_trend' AND kind = 'weekly_nutrition_trend' AND status = 'active'",
+                "SELECT body_json FROM domain_record WHERE user_id = 'owner' AND kind = 'weekly_nutrition_trend' AND status = 'active'",
             ).fetchone()
             self.assertIsNotNone(row)
             import json
@@ -228,7 +222,6 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
     def test_maintain_memory_missing_days_no_zero_injection(self) -> None:
         """Verify that missing days are disclosed and not divided by 7, avoiding fake 0-calorie days."""
         self.service.log_meal(
-            user_id="u_missing",
             occurred_at="2026-07-15T12:00:00+08:00",
             meal_type="lunch",
             foods=[{"name": "Pizza"}],
@@ -238,10 +231,10 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
             protein_high=90,
             idempotency_key="missing-meal-1",
         )
-        self.service.maintain_memory(user_id="u_missing", idempotency_key="maint-missing", prune_days=30)
+        self.service.maintain_memory(idempotency_key="maint-missing", prune_days=30)
         with self.service.store.connect() as conn:
             row = conn.execute(
-                "SELECT body_json FROM domain_record WHERE user_id = 'u_missing' AND kind = 'weekly_nutrition_trend' AND status = 'active'",
+                "SELECT body_json FROM domain_record WHERE user_id = 'owner' AND kind = 'weekly_nutrition_trend' AND status = 'active'",
             ).fetchone()
             import json
             body = json.loads(row["body_json"])
@@ -253,7 +246,6 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
     def test_maintain_memory_repeated_run_idempotency(self) -> None:
         """Verify that repeated maintenance without data changes does not create duplicate trend revisions."""
         self.service.log_meal(
-            user_id="u_idemp",
             occurred_at="2026-07-10T12:00:00+08:00",
             meal_type="lunch",
             foods=[{"name": "Salad"}],
@@ -263,23 +255,22 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
             protein_high=30,
             idempotency_key="idemp-meal-1",
         )
-        r1 = self.service.maintain_memory(user_id="u_idemp", idempotency_key="maint-idemp-1", prune_days=30)
+        r1 = self.service.maintain_memory(idempotency_key="maint-idemp-1", prune_days=30)
         self.assertEqual(r1["data"]["consolidated_trends"], 1)
 
         # Run again with second key: should be idempotent and not create a new revision
-        r2 = self.service.maintain_memory(user_id="u_idemp", idempotency_key="maint-idemp-2", prune_days=30)
+        r2 = self.service.maintain_memory(idempotency_key="maint-idemp-2", prune_days=30)
         self.assertEqual(r2["data"]["consolidated_trends"], 0)
 
         with self.service.store.connect() as conn:
             count = conn.execute(
-                "SELECT COUNT(*) as c FROM domain_record WHERE user_id = 'u_idemp' AND kind = 'weekly_nutrition_trend'",
+                "SELECT COUNT(*) as c FROM domain_record WHERE user_id = 'owner' AND kind = 'weekly_nutrition_trend'",
             ).fetchone()["c"]
             self.assertEqual(count, 1)
 
     def test_maintain_memory_late_arriving_meal_revision_chain(self) -> None:
         """Verify that late-arriving historical meal creates a new trend revision chained to previous via parent_id."""
         self.service.log_meal(
-            user_id="u_late",
             occurred_at="2026-07-20T12:00:00+08:00",
             meal_type="lunch",
             foods=[{"name": "Soup"}],
@@ -289,18 +280,17 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
             protein_high=20,
             idempotency_key="late-meal-1",
         )
-        self.service.maintain_memory(user_id="u_late", idempotency_key="maint-late-1", prune_days=30)
+        self.service.maintain_memory(idempotency_key="maint-late-1", prune_days=30)
 
         with self.service.store.connect() as conn:
             v1_row = conn.execute(
-                "SELECT record_id, status FROM domain_record WHERE user_id = 'u_late' AND kind = 'weekly_nutrition_trend' AND status = 'active'",
+                "SELECT record_id, status FROM domain_record WHERE user_id = 'owner' AND kind = 'weekly_nutrition_trend' AND status = 'active'",
             ).fetchone()
             self.assertIsNotNone(v1_row)
             v1_id = v1_row["record_id"]
 
         # Log late-arriving meal in the same ISO week (2026-07-22)
         self.service.log_meal(
-            user_id="u_late",
             occurred_at="2026-07-22T12:00:00+08:00",
             meal_type="dinner",
             foods=[{"name": "Salmon"}],
@@ -312,7 +302,7 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
         )
 
         # Re-run maintenance: should supersede v1 and create chained v2
-        r2 = self.service.maintain_memory(user_id="u_late", idempotency_key="maint-late-2", prune_days=30)
+        r2 = self.service.maintain_memory(idempotency_key="maint-late-2", prune_days=30)
         self.assertEqual(r2["data"]["consolidated_trends"], 1)
 
         with self.service.store.connect() as conn:
@@ -323,7 +313,7 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
             self.assertEqual(old_row["status"], "superseded")
 
             new_row = conn.execute(
-                "SELECT record_id, parent_id, status, body_json FROM domain_record WHERE user_id = 'u_late' AND kind = 'weekly_nutrition_trend' AND status = 'active'",
+                "SELECT record_id, parent_id, status, body_json FROM domain_record WHERE user_id = 'owner' AND kind = 'weekly_nutrition_trend' AND status = 'active'",
             ).fetchone()
             self.assertIsNotNone(new_row)
             self.assertEqual(new_row["parent_id"], v1_id)
@@ -335,7 +325,6 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
     def test_maintain_memory_prunes_foods_json_detail_preserves_macros(self) -> None:
         """Verify that maintenance safely sets foods_json='[]' while preserving numeric macros and timestamps."""
         logged = self.service.log_meal(
-            user_id="u_prune_detail",
             occurred_at="2026-07-12T12:00:00+08:00",
             meal_type="lunch",
             foods=[{"name": "Secret Recipe Spicy Stew", "amount_g": {"low": 300, "high": 350}}],
@@ -351,7 +340,7 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
             m_before = conn.execute("SELECT foods_json FROM meal_log WHERE meal_id = ?", (meal_id,)).fetchone()
             self.assertIn("Secret Recipe", m_before["foods_json"])
 
-        self.service.maintain_memory(user_id="u_prune_detail", idempotency_key="maint-detail-1", prune_days=30)
+        self.service.maintain_memory(idempotency_key="maint-detail-1", prune_days=30)
 
         # Verify foods_json is cleared to '[]' but macros remain intact
         with self.service.store.connect() as conn:
@@ -374,7 +363,6 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
         # 1. Unconfirmed delete must fail immediately
         with self.assertRaises(ValidationError) as ctx1:
             service.memory_action(
-                user_id="u_act",
                 action_type="delete",
                 target_note_path="wiki/Rule.md",
                 confirmed=False,
@@ -386,7 +374,6 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
         # 2. Unknown action must fail immediately
         with self.assertRaises(ValidationError) as ctx2:
             service.memory_action(
-                user_id="u_act",
                 action_type="arbitrary_illegal_op",
                 payload={"something": "bad"},
                 idempotency_key="act-illegal",
@@ -397,7 +384,6 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
         # 3. Confirm without candidate_id must fail immediately
         with self.assertRaises(ValidationError) as ctx3:
             service.memory_action(
-                user_id="u_act",
                 action_type="confirm",
                 confirmed=True,
                 idempotency_key="act-conf-no-id",
@@ -407,14 +393,13 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
 
         # Ensure no database records were inserted during failed attempts
         with service.store.connect() as conn:
-            op_count = conn.execute("SELECT COUNT(*) as c FROM operation_log WHERE user_id = 'u_act'").fetchone()["c"]
+            op_count = conn.execute("SELECT COUNT(*) as c FROM operation_log WHERE user_id = 'owner'").fetchone()["c"]
             self.assertEqual(op_count, 0)
-            outbox_count = conn.execute("SELECT COUNT(*) as c FROM memory_outbox WHERE user_id = 'u_act'").fetchone()["c"]
+            outbox_count = conn.execute("SELECT COUNT(*) as c FROM memory_outbox WHERE user_id = 'owner'").fetchone()["c"]
             self.assertEqual(outbox_count, 0)
 
         # 4. Valid confirmed delete succeeds and calls provider
         res_del = service.memory_action(
-            user_id="u_act",
             action_type="delete",
             target_note_path="wiki/Rule.md",
             confirmed=True,
@@ -436,14 +421,14 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
             with self.subTest(action_type=action_type, payload=payload):
                 with self.assertRaises(ValidationError):
                     service.memory_action(
-                        user_id="u_act", action_type=action_type,
+                        action_type=action_type,
                         confirmed=confirmed, payload=payload,
                         idempotency_key=f"reject-{action_type}-{len(mock_prov.calls)}",
                     )
         self.assertEqual(mock_prov.calls, [])
 
         accepted = service.memory_action(
-            user_id="u_act", action_type="action", confirmed=True,
+            action_type="action", confirmed=True,
             payload={"candidate_id": "cand-example", "action_type": "confirm"},
             idempotency_key="confirmed-generic-action",
         )
@@ -453,10 +438,8 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
 
     def test_maintain_memory_supersedes_stale_trend_when_all_meals_deleted(self) -> None:
         """Verify that deleting the last meal in a historical week supersedes the stale trend and preserves lineage."""
-        user_id = "u_del_trend"
         # 1. Log a historical meal in week 2026-W30 (2026-07-20)
         meal = self.service.log_meal(
-            user_id=user_id,
             occurred_at="2026-07-20T12:00:00+08:00",
             meal_type="lunch",
             foods=[{"name": "Chicken Rice"}],
@@ -469,22 +452,22 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
         meal_id = meal["data"]["meal_id"]
 
         # 2. Run maintenance: generates active weekly trend
-        r1 = self.service.maintain_memory(user_id=user_id, idempotency_key="del-maint-1", prune_days=30)
+        r1 = self.service.maintain_memory(idempotency_key="del-maint-1", prune_days=30)
         self.assertEqual(r1["data"]["consolidated_trends"], 1)
 
         with self.service.store.connect() as conn:
             v1_row = conn.execute(
                 "SELECT record_id, status FROM domain_record WHERE user_id = ? AND kind = 'weekly_nutrition_trend' AND status = 'active'",
-                (user_id,),
+                (OWNER,),
             ).fetchone()
             self.assertIsNotNone(v1_row)
             v1_id = v1_row["record_id"]
 
         # 3. Delete the last meal in that week
-        self.service.delete_meal(user_id=user_id, meal_id=meal_id, idempotency_key="del-meal-op-1")
+        self.service.delete_meal(meal_id=meal_id, idempotency_key="del-meal-op-1")
 
         # 4. Run maintenance again: must detect no active meals, supersede v1, and record retraction chained to v1
-        r2 = self.service.maintain_memory(user_id=user_id, idempotency_key="del-maint-2", prune_days=30)
+        r2 = self.service.maintain_memory(idempotency_key="del-maint-2", prune_days=30)
         self.assertEqual(r2["data"]["consolidated_trends"], 1)
 
         with self.service.store.connect() as conn:
@@ -495,14 +478,14 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
             # No active weekly trend remains for this user
             active_trends = conn.execute(
                 "SELECT record_id FROM domain_record WHERE user_id = ? AND kind = 'weekly_nutrition_trend' AND status = 'active'",
-                (user_id,),
+                (OWNER,),
             ).fetchall()
             self.assertEqual(len(active_trends), 0)
 
             # A retraction record exists chaining to v1
             retract_row = conn.execute(
                 "SELECT record_id, parent_id, status, body_json FROM domain_record WHERE user_id = ? AND kind = 'weekly_nutrition_trend' AND parent_id = ?",
-                (user_id, v1_id),
+                (OWNER, v1_id),
             ).fetchone()
             self.assertIsNotNone(retract_row)
             self.assertEqual(retract_row["parent_id"], v1_id)
@@ -512,19 +495,17 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
             self.assertEqual(b.get("status"), "retracted")
 
         # 5. Repeat run idempotency: running maintenance a third time does nothing extra
-        r3 = self.service.maintain_memory(user_id=user_id, idempotency_key="del-maint-3", prune_days=30)
+        r3 = self.service.maintain_memory(idempotency_key="del-maint-3", prune_days=30)
         self.assertEqual(r3["data"]["consolidated_trends"], 0)
 
     def test_training_prescription_unified_decision_matrix(self) -> None:
         """Verify unified decision matrix: constraints, equipment, experience, evidence, and non-diagnostic disclaimers."""
-        u_knee = "u_knee_user"
         # 1. Knee constraint substitution & unrecorded state disclosure
         self.service.update_profile(
-            user_id=u_knee,
             constraints={"knee_injury": "patellofemoral pain, avoid deep squat"},
             idempotency_key="prof-knee-01",
         )
-        plan_knee = self.service.get_training_plan(user_id=u_knee, date="2026-09-05", equipment=["barbell"])
+        plan_knee = self.service.get_training_plan(date="2026-09-05", equipment=["barbell"])
         p_data = plan_knee["plan"]
         self.assertEqual(p_data["rule_code"], "TRAIN_PROGRESSION_STANDARD")
         self.assertEqual(p_data["state_evidence"], "unrecorded_recent_state")
@@ -542,8 +523,7 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
         self.assertIn("不构成医疗处方", p_data["disclaimer"])
 
         # 2. Bodyweight-only equipment adaptation
-        u_bw = "u_bw_user"
-        plan_bw = self.service.get_training_plan(user_id=u_bw, date="2026-09-05", equipment=["bodyweight"])
+        plan_bw = self.service.get_training_plan(date="2026-09-05", equipment=["bodyweight"])
         p_bw_data = plan_bw["plan"]
         self.assertEqual(p_bw_data["equipment_mode"], "bodyweight")
         bw_ex_names = [e["name"] for e in p_bw_data["prescribed_exercises"]]
@@ -553,19 +533,17 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
 
         # 3. Shoulder constraint in Deload mode: Incline Pushup replaced with Bird Dog
         self.service.update_profile(
-            user_id=u_knee,
             constraints={"shoulder": "rotator cuff tendinitis, avoid pushup"},
             safety_flags=["chest_pain"],
             idempotency_key="prof-shoulder-deload",
         )
         # Clear flag with clearance to enter 7-day deload
         self.service.update_profile(
-            user_id=u_knee,
             clear_safety_flags=True,
             clearance_reason="Physician clearance issued",
             idempotency_key="prof-shoulder-clear",
         )
-        plan_deload = self.service.get_training_plan(user_id=u_knee, date="2026-09-05")
+        plan_deload = self.service.get_training_plan(date="2026-09-05")
         p_dl = plan_deload["plan"]
         self.assertEqual(p_dl["rule_code"], "RECOVERY_FLAG_CLEAR_01")
         dl_ex_names = [e["name"] for e in p_dl["prescribed_exercises"]]

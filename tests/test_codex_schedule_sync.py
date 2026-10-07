@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from cyber_health.service import CyberHealthService
 from cyber_health.store import SQLiteStore
+from test_support import OWNER
 
 UTC = UTC
 
@@ -24,9 +25,8 @@ class TestCodexScheduleSync(unittest.TestCase):
 
     def test_five_standard_windows_generated_with_stable_ids(self):
         """Standard schedule generates 5 windows: morning, lunch, workout, dinner, review."""
-        user_id = "u_sched_test"
         date = "2026-09-04"
-        res1 = self.service.schedule_daily_reminders(user_id=user_id, date=date, idempotency_key="sched-k1")
+        res1 = self.service.schedule_daily_reminders(date=date, idempotency_key="sched-k1")
         events1 = res1["data"]["scheduled_events"]
         self.assertEqual(len(events1), 5)
 
@@ -41,23 +41,21 @@ class TestCodexScheduleSync(unittest.TestCase):
         )
 
         # Distinct request replay produces identical IDs
-        res2 = self.service.schedule_daily_reminders(user_id=user_id, date=date, idempotency_key="sched-k2")
+        res2 = self.service.schedule_daily_reminders(date=date, idempotency_key="sched-k2")
         events2 = res2["data"]["scheduled_events"]
         self.assertEqual([e["event_id"] for e in events1], [e["event_id"] for e in events2])
 
     def test_postponement_preserved_on_rescheduling(self):
         """User-postponed events retain their new window and revision > 1, never overridden by defaults."""
-        user_id = "u_postpone_user"
         date = "2026-09-04"
-        self.service.schedule_daily_reminders(user_id=user_id, date=date, idempotency_key="init_sched")
+        self.service.schedule_daily_reminders(date=date, idempotency_key="init_sched")
 
-        lunch_id = f"sched_{user_id}_{date}_meal_check_lunch"
+        lunch_id = f"sched_{OWNER}_{date}_meal_check_lunch"
         new_start = "2026-09-04T14:30:00+08:00"
         new_end = "2026-09-04T15:30:00+08:00"
 
         # Postpone lunch
         postpone_res = self.service.update_schedule_event(
-            user_id=user_id,
             event_id=lunch_id,
             action="postponed",
             new_window_start=new_start,
@@ -68,7 +66,7 @@ class TestCodexScheduleSync(unittest.TestCase):
         self.assertEqual(postpone_res["data"]["revision"], 2)
 
         # Re-run schedule_daily_reminders (e.g. host daily sync)
-        res_resched = self.service.schedule_daily_reminders(user_id=user_id, date=date, idempotency_key="resched-lunch")
+        res_resched = self.service.schedule_daily_reminders(date=date, idempotency_key="resched-lunch")
         lunch_event = next(e for e in res_resched["data"]["scheduled_events"] if e["event_id"] == lunch_id)
 
         # Must preserve postponed window and revision
@@ -79,35 +77,32 @@ class TestCodexScheduleSync(unittest.TestCase):
 
     def test_tombstone_snapshot_for_host_timer_cancellation(self):
         """Cancelled and skipped events are hidden by default, but exposed as tombstones when include_inactive=True."""
-        user_id = "u_tombstone_user"
         date = "2026-09-04"
-        self.service.schedule_daily_reminders(user_id=user_id, date=date, idempotency_key="init_sched")
+        self.service.schedule_daily_reminders(date=date, idempotency_key="init_sched")
 
-        wo_id = f"sched_{user_id}_{date}_workout_reminder"
-        dinner_id = f"sched_{user_id}_{date}_meal_check_dinner"
+        wo_id = f"sched_{OWNER}_{date}_workout_reminder"
+        dinner_id = f"sched_{OWNER}_{date}_meal_check_dinner"
 
         # Cancel workout, skip dinner
         self.service.update_schedule_event(
-            user_id=user_id,
             event_id=wo_id,
             action="cancelled",
             idempotency_key="cancel-wo",
         )
         self.service.update_schedule_event(
-            user_id=user_id,
             event_id=dinner_id,
             action="skipped",
             idempotency_key="skip-dinner",
         )
 
         # Default query: only active pending/overdue
-        active_events = self.service.get_schedule(user_id=user_id, date=date, include_inactive=False)
+        active_events = self.service.get_schedule(date=date, include_inactive=False)
         self.assertEqual(len(active_events), 3)
         self.assertNotIn(wo_id, [e["event_id"] for e in active_events])
         self.assertNotIn(dinner_id, [e["event_id"] for e in active_events])
 
         # Full snapshot: include_inactive=True returns tombstones
-        full_events = self.service.get_schedule(user_id=user_id, date=date, include_inactive=True)
+        full_events = self.service.get_schedule(date=date, include_inactive=True)
         self.assertEqual(len(full_events), 5)
 
         wo_event = next(e for e in full_events if e["event_id"] == wo_id)
@@ -122,19 +117,18 @@ class TestCodexScheduleSync(unittest.TestCase):
 
     def test_read_purity_of_get_schedule(self):
         """get_schedule derives overdue in memory without updating DB or state_version."""
-        user_id = "u_purity_user"
         date = "2026-09-04"
-        self.service.schedule_daily_reminders(user_id=user_id, date=date, idempotency_key="init_sched")
+        self.service.schedule_daily_reminders(date=date, idempotency_key="init_sched")
 
-        prof_before = self.service.get_profile(user_id)
+        prof_before = self.service.get_profile()
         version_before = prof_before["state_version"]
 
         with self.store.connect() as conn:
-            op_count_before = conn.execute("SELECT COUNT(*) AS c FROM operation_log WHERE user_id = ?", (user_id,)).fetchone()["c"]
+            op_count_before = conn.execute("SELECT COUNT(*) AS c FROM operation_log WHERE user_id = ?", (OWNER,)).fetchone()["c"]
 
         # Call get_schedule at 23:00 (all 5 windows have elapsed)
         now_late = datetime(2026, 9, 4, 23, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
-        events = self.service.get_schedule(user_id=user_id, date=date, now=now_late)
+        events = self.service.get_schedule(date=date, now=now_late)
 
         # All events should be derived as overdue with compensation required
         self.assertEqual(len(events), 5)
@@ -143,26 +137,25 @@ class TestCodexScheduleSync(unittest.TestCase):
             self.assertTrue(e["compensation_required"])
 
         # Profile state version must be strictly untouched
-        prof_after = self.service.get_profile(user_id)
+        prof_after = self.service.get_profile()
         self.assertEqual(prof_after["state_version"], version_before)
 
         # Operation log must have ZERO new operations
         with self.store.connect() as conn:
-            op_count_after = conn.execute("SELECT COUNT(*) AS c FROM operation_log WHERE user_id = ?", (user_id,)).fetchone()["c"]
+            op_count_after = conn.execute("SELECT COUNT(*) AS c FROM operation_log WHERE user_id = ?", (OWNER,)).fetchone()["c"]
             self.assertEqual(op_count_after, op_count_before)
 
             # In SQLite, schedule_event rows must still remain pending (not sneaky unversioned UPDATEs)
-            raw_statuses = [r["status"] for r in conn.execute("SELECT status FROM schedule_event WHERE user_id = ?", (user_id,)).fetchall()]
+            raw_statuses = [r["status"] for r in conn.execute("SELECT status FROM schedule_event WHERE user_id = ?", (OWNER,)).fetchall()]
             self.assertTrue(all(s == "pending" for s in raw_statuses))
 
     def test_dynamic_eligibility_suppression_rules(self):
         """Test trigger eligibility suppression by domain facts."""
-        user_id = "u_facts_user"
         date = "2026-09-04"
-        self.service.schedule_daily_reminders(user_id=user_id, date=date, idempotency_key="init_sched")
+        self.service.schedule_daily_reminders(date=date, idempotency_key="init_sched")
 
         # 1. Initially all 5 are eligible
-        events = {e["trigger_condition"]: e for e in self.service.get_schedule(user_id=user_id, date=date)}
+        events = {e["trigger_condition"]: e for e in self.service.get_schedule(date=date)}
         self.assertTrue(events["morning_plan_not_locked"]["eligible"])
         self.assertTrue(events["lunch_not_logged"]["eligible"])
         self.assertTrue(events["workout_pending"]["eligible"])
@@ -170,14 +163,13 @@ class TestCodexScheduleSync(unittest.TestCase):
         self.assertTrue(events["review_pending"]["eligible"])
 
         # 2. Lock morning plan -> morning_plan suppressed
-        self.service.plan_tomorrow(user_id=user_id, date=date, commit=True, idempotency_key="commit-plan")
-        events = {e["trigger_condition"]: e for e in self.service.get_schedule(user_id=user_id, date=date)}
+        self.service.plan_tomorrow(date=date, commit=True, idempotency_key="commit-plan")
+        events = {e["trigger_condition"]: e for e in self.service.get_schedule(date=date)}
         self.assertFalse(events["morning_plan_not_locked"]["eligible"])
         self.assertEqual(events["morning_plan_not_locked"]["suppression_reason"], "morning_plan_already_committed")
 
         # 3. Log lunch -> lunch_check suppressed
         self.service.log_meal(
-            user_id=user_id,
             occurred_at=f"{date}T12:30:00+08:00",
             meal_type="lunch",
             foods=[{"name": "米饭", "amount_g": {"low": 150, "high": 150}}],
@@ -185,7 +177,7 @@ class TestCodexScheduleSync(unittest.TestCase):
             kcal_high=350,
             idempotency_key="log-lunch",
         )
-        events = {e["trigger_condition"]: e for e in self.service.get_schedule(user_id=user_id, date=date)}
+        events = {e["trigger_condition"]: e for e in self.service.get_schedule(date=date)}
         self.assertFalse(events["lunch_not_logged"]["eligible"])
         self.assertEqual(events["lunch_not_logged"]["suppression_reason"], "lunch_already_logged")
         # Dinner remains eligible
@@ -193,19 +185,17 @@ class TestCodexScheduleSync(unittest.TestCase):
 
         # 4. Complete workout -> workout_reminder suppressed
         self.service.complete_workout(
-            user_id=user_id,
             date=date,
             completed_exercises=[{"name": "深蹲", "sets": 3, "reps": 8}],
             completion_rate=1.0,
             idempotency_key="comp-wo",
         )
-        events = {e["trigger_condition"]: e for e in self.service.get_schedule(user_id=user_id, date=date)}
+        events = {e["trigger_condition"]: e for e in self.service.get_schedule(date=date)}
         self.assertFalse(events["workout_pending"]["eligible"])
         self.assertEqual(events["workout_pending"]["suppression_reason"], "workout_already_completed")
 
         # 5. Log dinner -> dinner_check suppressed
         self.service.log_meal(
-            user_id=user_id,
             occurred_at=f"{date}T19:00:00+08:00",
             meal_type="dinner",
             foods=[{"name": "鸡胸肉沙拉", "amount_g": {"low": 200, "high": 200}}],
@@ -213,28 +203,26 @@ class TestCodexScheduleSync(unittest.TestCase):
             kcal_high=300,
             idempotency_key="log-dinner",
         )
-        events = {e["trigger_condition"]: e for e in self.service.get_schedule(user_id=user_id, date=date)}
+        events = {e["trigger_condition"]: e for e in self.service.get_schedule(date=date)}
         self.assertFalse(events["dinner_not_logged"]["eligible"])
         self.assertEqual(events["dinner_not_logged"]["suppression_reason"], "dinner_already_logged")
 
         # 6. Complete daily review -> review suppressed
-        self.service.daily_review(user_id=user_id, date=date, idempotency_key="rev-today")
-        events = {e["trigger_condition"]: e for e in self.service.get_schedule(user_id=user_id, date=date)}
+        self.service.daily_review(date=date, idempotency_key="rev-today")
+        events = {e["trigger_condition"]: e for e in self.service.get_schedule(date=date)}
         self.assertFalse(events["review_pending"]["eligible"])
         self.assertEqual(events["review_pending"]["suppression_reason"], "daily_review_already_completed")
 
     def test_profile_reminders_disabled_suppresses_all(self):
         """When user disables reminders in profile, all schedule events are suppressed."""
-        user_id = "u_disabled_reminders"
         date = "2026-09-04"
-        self.service.schedule_daily_reminders(user_id=user_id, date=date, idempotency_key="init_sched")
+        self.service.schedule_daily_reminders(date=date, idempotency_key="init_sched")
         self.service.update_profile(
-            user_id=user_id,
             constraints={"reminders_enabled": False},
             idempotency_key="disable-reminders",
         )
 
-        events = self.service.get_schedule(user_id=user_id, date=date)
+        events = self.service.get_schedule(date=date)
         self.assertEqual(len(events), 5)
         for e in events:
             self.assertFalse(e["eligible"])
@@ -242,19 +230,17 @@ class TestCodexScheduleSync(unittest.TestCase):
 
     def test_restricted_mode_suppresses_workout_reminder(self):
         """When user is in restricted mode, workout reminder is suppressed with safety_restricted_mode."""
-        user_id = "u_restricted_user"
         date = "2026-09-04"
-        self.service.schedule_daily_reminders(user_id=user_id, date=date, idempotency_key="init_sched")
+        self.service.schedule_daily_reminders(date=date, idempotency_key="init_sched")
 
         # Report acute red flag to trigger restricted mode
         self.service.complete_workout(
-            user_id=user_id,
             date=date,
             discomfort_notes="胸痛且呼吸困难",
             idempotency_key="chest-pain-wo",
         )
 
-        events = {e["trigger_condition"]: e for e in self.service.get_schedule(user_id=user_id, date=date)}
+        events = {e["trigger_condition"]: e for e in self.service.get_schedule(date=date)}
         self.assertFalse(events["workout_pending"]["eligible"])
         self.assertEqual(events["workout_pending"]["suppression_reason"], "safety_restricted_mode")
 
@@ -275,8 +261,6 @@ class TestCodexScheduleSync(unittest.TestCase):
             async with stdio_client(server_params) as (read_stream, write_stream):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
-
-                    user_id = "owner"
                     date = "2026-09-04"
 
                     # 1. Generate daily reminders
@@ -298,7 +282,7 @@ class TestCodexScheduleSync(unittest.TestCase):
                     self.assertTrue(all(e["eligible"] for e in pull_data["events"]))
 
                     # 3. Postpone lunch event
-                    lunch_id = f"sched_{user_id}_{date}_meal_check_lunch"
+                    lunch_id = f"sched_{OWNER}_{date}_meal_check_lunch"
                     postpone_res = await session.call_tool(
                         "cyber_health_update_schedule_event",
                         {
@@ -314,7 +298,7 @@ class TestCodexScheduleSync(unittest.TestCase):
                     self.assertEqual(postpone_data["data"]["revision"], 2)
 
                     # 4. Cancel workout reminder
-                    wo_id = f"sched_{user_id}_{date}_workout_reminder"
+                    wo_id = f"sched_{OWNER}_{date}_workout_reminder"
                     cancel_res = await session.call_tool(
                         "cyber_health_update_schedule_event",
                         {

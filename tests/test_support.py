@@ -76,3 +76,7 @@ def runnable_cli(name: str) -> str | None:
     except (OSError, subprocess.TimeoutExpired):
         return None
     return path if probe.returncode == 0 else None
+
+
+# The single identity every fact is stored under (see cyber_health.store.SINGLE_USER_ID).
+OWNER = "owner"

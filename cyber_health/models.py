@@ -63,7 +63,6 @@ class FoodItem(BaseModel):
 class LogMealInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    user_id: str = Field(..., min_length=1)
     occurred_at: str = Field(...)
     meal_type: str = Field(..., min_length=1)
     foods: list[FoodItem] = Field(default_factory=list)
@@ -99,7 +98,6 @@ class LogMealInput(BaseModel):
 class DeleteMealInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    user_id: str = Field(..., min_length=1)
     meal_id: str = Field(..., min_length=1)
     idempotency_key: str = Field(..., min_length=1)
     reason: str | None = None
@@ -121,7 +119,6 @@ class DailyMetricsInput(BaseModel):
 class LogDailyMetricsInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    user_id: str = Field(..., min_length=1)
     date: str = Field(...)
     metrics: DailyMetricsInput
     idempotency_key: str = Field(..., min_length=1)
@@ -165,7 +162,6 @@ class ProfileGoals(BaseModel):
 class UpdateProfileInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    user_id: str = Field(..., min_length=1)
     idempotency_key: str = Field(..., min_length=1)
     goals: ProfileGoals | dict[str, Any] | None = None
     constraints: dict[str, Any] | None = None
@@ -245,7 +241,6 @@ class SourceImageInput(BaseModel):
 class LogWorkoutInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    user_id: str = Field(..., min_length=1)
     idempotency_key: str = Field(..., min_length=1)
     session_id: str | None = None
     date: str = Field(...)
@@ -267,7 +262,6 @@ class LogWorkoutInput(BaseModel):
 class DailyReviewInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    user_id: str = Field(..., min_length=1)
     date: str = Field(...)
     idempotency_key: str = Field(..., min_length=1)
     user_notes: str | None = None
@@ -282,7 +276,6 @@ class DailyReviewInput(BaseModel):
 class PlanTomorrowInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    user_id: str = Field(..., min_length=1)
     date: str = Field(...)
     idempotency_key: str = Field(..., min_length=1)
     commit: bool = False
@@ -297,7 +290,6 @@ class PlanTomorrowInput(BaseModel):
 class AcknowledgeScheduleInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    user_id: str = Field(..., min_length=1)
     event_id: str = Field(..., min_length=1)
     action: Literal["delivered", "acknowledged", "skipped", "cancelled", "postponed"] = "acknowledged"
     idempotency_key: str = Field(..., min_length=1)
@@ -322,7 +314,6 @@ class AcknowledgeScheduleInput(BaseModel):
 class GetTrainingPlanInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    user_id: str = Field(..., min_length=1)
     date: str = Field(...)
     equipment: list[str] = Field(default_factory=list)
     target_duration_min: int = Field(default=45, ge=10, le=180)
@@ -337,7 +328,6 @@ class GetTrainingPlanInput(BaseModel):
 class ConfirmProgressionInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    user_id: str = Field(..., min_length=1)
     exercise_name: str = Field(..., min_length=1)
     confirmed_weight_kg: float | None = Field(default=None, ge=0.0, le=1000.0)
     confirmed_reps: int | None = Field(default=None, ge=1, le=500)
@@ -360,7 +350,6 @@ class ConfirmProgressionInput(BaseModel):
 class SubstituteExerciseInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    user_id: str = Field(..., min_length=1)
     original_exercise: str = Field(..., min_length=1)
     equipment: list[str] = Field(default_factory=list)
     discomfort_joint: str | None = None
@@ -370,7 +359,6 @@ class SubstituteExerciseInput(BaseModel):
 class CompleteWorkoutInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    user_id: str = Field(..., min_length=1)
     date: str = Field(...)
     idempotency_key: str = Field(..., min_length=1)
     completed_exercises: list[dict[str, Any]] = Field(default_factory=list)
@@ -391,16 +379,9 @@ class QueryKnowledgeInput(BaseModel):
     category: str | None = None
 
 
-class ExportDataInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    user_id: str = Field(..., min_length=1)
-
-
 class ImportDataInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    user_id: str = Field(..., min_length=1)
     data: dict[str, Any] = Field(...)
     idempotency_key: str = Field(..., min_length=1)
 
@@ -408,7 +389,6 @@ class ImportDataInput(BaseModel):
 class MaintainMemoryInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    user_id: str = Field(..., min_length=1)
     prune_days: int = Field(default=30, ge=1)
     idempotency_key: str = Field(..., min_length=1)
 
@@ -432,7 +412,6 @@ def _effective_memory_action(action: str, payload: dict[str, Any]) -> str:
 class ProposeMemoryInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    user_id: str = Field(..., min_length=1)
     method: str = Field(..., min_length=1)
     payload: dict[str, Any] = Field(default_factory=dict)
     idempotency_key: str = Field(..., min_length=1)
@@ -480,7 +459,6 @@ class ProposeMemoryInput(BaseModel):
 class MemoryActionInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    user_id: str = Field(..., min_length=1)
     action_type: str = Field(..., min_length=1)
     idempotency_key: str = Field(..., min_length=1)
     candidate_id: str | None = None
@@ -531,7 +509,6 @@ class MemoryActionInput(BaseModel):
 class GetRemainingCaloriesInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    user_id: str = Field(..., min_length=1)
     date: str = Field(...)
 
     @field_validator("date")
@@ -543,7 +520,6 @@ class GetRemainingCaloriesInput(BaseModel):
 class ScheduleDailyRemindersInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    user_id: str = Field(..., min_length=1)
     date: str = Field(...)
     idempotency_key: str = Field(..., min_length=1)
 
@@ -556,7 +532,6 @@ class ScheduleDailyRemindersInput(BaseModel):
 class QueryMemoryInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    user_id: str = Field(..., min_length=1)
     query: str = Field(..., min_length=1)
     limit: int = Field(default=10, ge=1, le=50)
 
@@ -566,7 +541,6 @@ class GetMemorySuggestionsInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    user_id: str = Field(..., min_length=1)
     date: str = Field(...)
     window_days: int = Field(default=30, ge=1, le=90)
     limit: int = Field(default=3, ge=1, le=3)

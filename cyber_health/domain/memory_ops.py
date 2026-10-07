@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from ..errors import IdempotencyMismatchError, ValidationError
 from ..memory import MemoryUnavailable
 from ..models import GetMemorySuggestionsInput, MaintainMemoryInput, MemoryActionInput, ProposeMemoryInput, QueryMemoryInput
-from .base import _INVALID_ZONE_ERRORS, _MALFORMED_RECORD_ERRORS, ServiceCore
+from .base import _INVALID_ZONE_ERRORS, _MALFORMED_RECORD_ERRORS, OWNER_ID, ServiceCore
 
 
 class MemoryOpsMixin(ServiceCore):
@@ -23,7 +23,6 @@ class MemoryOpsMixin(ServiceCore):
     def _calculate_maintenance_due(
         self,
         conn: Any,
-        user_id: str,
         now_dt: datetime | None = None,
         day: str | None = None,
         prune_days: int = 30,
@@ -41,7 +40,7 @@ class MemoryOpsMixin(ServiceCore):
                WHERE user_id = ?
                  AND (status = 'pending' OR (status = 'in_flight' AND lease_until IS NOT NULL AND lease_until < ?))
                ORDER BY created_at ASC""",
-            (user_id, now_iso),
+            (OWNER_ID, now_iso),
         ).fetchall()
 
         pending_rows = [r for r in eligible_rows if r["status"] == "pending"]
@@ -55,7 +54,7 @@ class MemoryOpsMixin(ServiceCore):
                WHERE user_id = ? AND status = 'active'
                  AND substr(occurred_at, 1, 10) < ?
                  AND foods_json != '[]'""",
-            (user_id, cutoff_date),
+            (OWNER_ID, cutoff_date),
         ).fetchone()["c"]
 
         # 3. Query TTL unreferenced superseded domain records eligible for purge
@@ -67,14 +66,14 @@ class MemoryOpsMixin(ServiceCore):
                  AND record_id NOT IN (
                      SELECT DISTINCT parent_id FROM domain_record WHERE user_id = ? AND parent_id IS NOT NULL
                  )""",
-            (user_id, cutoff_iso, user_id),
+            (OWNER_ID, cutoff_iso, OWNER_ID),
         ).fetchone()["c"]
 
         # 4. Query TTL sent outbox records eligible for purge
         ttl_sent_count = conn.execute(
             """SELECT COUNT(*) AS c FROM memory_outbox
                WHERE user_id = ? AND status = 'sent' AND created_at < ?""",
-            (user_id, cutoff_iso),
+            (OWNER_ID, cutoff_iso),
         ).fetchone()["c"]
 
         ttl_prune_count = ttl_meals_count + ttl_records_count + ttl_sent_count
@@ -107,7 +106,7 @@ class MemoryOpsMixin(ServiceCore):
             hasher.update(f"ttl:{ttl_meals_count}:{ttl_records_count}:{ttl_sent_count}".encode())
             work_gen_hash = hasher.hexdigest()[:12]
             target_day = day or now_dt.strftime("%Y-%m-%d")
-            maintenance_key = f"maint_{user_id}_{target_day}_g{work_gen_hash}"
+            maintenance_key = f"maint_{OWNER_ID}_{target_day}_g{work_gen_hash}"
 
             # If there are failed attempts, calculate exponential backoff
             failed_attempts = [r["attempts"] for r in pending_rows if r["attempts"] > 0]
@@ -144,7 +143,6 @@ class MemoryOpsMixin(ServiceCore):
     def propose_memory_candidate(
         self,
         *,
-        user_id: str,
         method: str,
         payload: dict[str, Any],
         idempotency_key: str,
@@ -152,7 +150,6 @@ class MemoryOpsMixin(ServiceCore):
         """Propose a memory candidate with durable intent committed before bounded external IO."""
         try:
             ProposeMemoryInput(
-                user_id=user_id,
                 method=method,
                 payload=payload,
                 idempotency_key=idempotency_key,
@@ -162,18 +159,18 @@ class MemoryOpsMixin(ServiceCore):
 
         op_payload = {
             "action": "propose_memory_candidate",
-            "user_id": user_id,
+            "user_id": OWNER_ID,
             "method": method,
             "payload": payload,
         }
         now_dt = self._utcnow()
         now = now_dt.isoformat()
         operation_id = f"op_{uuid.uuid4().hex}"
-        intent_id = self._make_intent_id(user_id, idempotency_key)
+        intent_id = self._make_intent_id(idempotency_key)
         request_hash = self._request_hash(op_payload)
 
         call_payload = dict(payload)
-        call_payload["user_id"] = user_id
+        call_payload["user_id"] = OWNER_ID
         call_payload["intent_id"] = intent_id
         call_payload["idempotency_key"] = idempotency_key
 
@@ -184,22 +181,22 @@ class MemoryOpsMixin(ServiceCore):
         with self.store.transaction() as conn:
             # Intent ids are derived from the key, so a memory key is never recycled.
             existing = self._check_idempotency(
-                conn, user_id, idempotency_key, "propose_memory_candidate", op_payload, allow_key_reuse=False
+                conn, idempotency_key, "propose_memory_candidate", op_payload, allow_key_reuse=False
             )
             if existing:
                 return existing
 
             row = conn.execute(
                 "SELECT operation_id, request_hash, result_status FROM operation_log WHERE user_id = ? AND idempotency_key = ?",
-                (user_id, idempotency_key),
+                (OWNER_ID, idempotency_key),
             ).fetchone()
             if row and row["request_hash"] != request_hash:
                 raise IdempotencyMismatchError(
                     f"Idempotency key '{idempotency_key}' was previously used with a different request or action."
                 )
 
-            self._ensure_profile_in_tx(conn, user_id, now)
-            profile = conn.execute("SELECT state_version FROM user_profile WHERE user_id = ?", (user_id,)).fetchone()
+            self._ensure_profile_in_tx(conn, now)
+            profile = conn.execute("SELECT state_version FROM user_profile WHERE user_id = ?", (OWNER_ID,)).fetchone()
             before_version = profile["state_version"]
 
             if not row:
@@ -208,7 +205,7 @@ class MemoryOpsMixin(ServiceCore):
                         operation_id, user_id, idempotency_key, request_hash, action,
                         result_status, before_version, after_version, response_json, created_at
                     ) VALUES (?, ?, ?, ?, 'propose_memory_candidate', 'pending', ?, ?, '', ?)""",
-                    (operation_id, user_id, idempotency_key, request_hash, before_version, before_version, now),
+                    (operation_id, OWNER_ID, idempotency_key, request_hash, before_version, before_version, now),
                 )
             else:
                 operation_id = row["operation_id"]
@@ -250,7 +247,7 @@ class MemoryOpsMixin(ServiceCore):
                     ) VALUES (?, ?, ?, ?, ?, ?, 'in_flight', 0, ?, ?, ?, ?)""",
                     (
                         intent_id,
-                        user_id,
+                        OWNER_ID,
                         idempotency_key,
                         request_hash,
                         method,
@@ -273,13 +270,13 @@ class MemoryOpsMixin(ServiceCore):
 
         # Phase 3: Short transaction to update outbox status, state_version, and operation log
         with self.store.transaction() as conn:
-            profile = conn.execute("SELECT state_version FROM user_profile WHERE user_id = ?", (user_id,)).fetchone()
+            profile = conn.execute("SELECT state_version FROM user_profile WHERE user_id = ?", (OWNER_ID,)).fetchone()
             before_version = profile["state_version"]
             after_version = before_version + 1
 
             conn.execute(
                 "UPDATE user_profile SET state_version = ?, updated_at = ? WHERE user_id = ?",
-                (after_version, now, user_id),
+                (after_version, now, OWNER_ID),
             )
 
             if provider_success:
@@ -313,7 +310,6 @@ class MemoryOpsMixin(ServiceCore):
             self._record_operation(
                 conn,
                 operation_id=operation_id,
-                user_id=user_id,
                 idempotency_key=idempotency_key,
                 payload=op_payload,
                 action="propose_memory_candidate",
@@ -326,7 +322,6 @@ class MemoryOpsMixin(ServiceCore):
     def memory_action(
         self,
         *,
-        user_id: str,
         action_type: str,
         idempotency_key: str,
         candidate_id: str | None = None,
@@ -344,7 +339,6 @@ class MemoryOpsMixin(ServiceCore):
         # Validation happens FIRST: any invalid action or unconfirmed delete/confirm fails immediately before DB/IO
         try:
             validated = MemoryActionInput(
-                user_id=user_id,
                 action_type=action_type,
                 idempotency_key=idempotency_key,
                 candidate_id=candidate_id,
@@ -359,7 +353,6 @@ class MemoryOpsMixin(ServiceCore):
         p["confirmed"] = validated.confirmed
         method = f"memory.{validated.action_type}"
         return self.propose_memory_candidate(
-            user_id=user_id,
             method=method,
             payload=p,
             idempotency_key=idempotency_key,
@@ -368,17 +361,16 @@ class MemoryOpsMixin(ServiceCore):
     def maintain_memory(
         self,
         *,
-        user_id: str,
         prune_days: int = 30,
         idempotency_key: str,
     ) -> dict[str, Any]:
         """Drain pending outbox intents with bounded IO outside locks and calculate eligible prune counts."""
         try:
-            MaintainMemoryInput(user_id=user_id, prune_days=prune_days, idempotency_key=idempotency_key)
+            MaintainMemoryInput(prune_days=prune_days, idempotency_key=idempotency_key)
         except Exception as err:
             raise ValidationError(str(err)) from err
 
-        payload = {"action": "maintain_memory", "user_id": user_id, "prune_days": prune_days}
+        payload = {"action": "maintain_memory", "user_id": OWNER_ID, "prune_days": prune_days}
         owner_token = f"maint_{uuid.uuid4().hex[:12]}"
         now_dt = self._utcnow()
         now = now_dt.isoformat()
@@ -387,7 +379,7 @@ class MemoryOpsMixin(ServiceCore):
 
         # 1. Atomic in-flight claim inside a short transaction with owner_token + lease (max 50)
         with self.store.transaction() as conn:
-            existing = self._check_idempotency(conn, user_id, idempotency_key, "maintain_memory", payload)
+            existing = self._check_idempotency(conn, idempotency_key, "maintain_memory", payload)
             if existing:
                 return existing
 
@@ -398,7 +390,7 @@ class MemoryOpsMixin(ServiceCore):
                      AND (status = 'pending' OR (status = 'in_flight' AND lease_until IS NOT NULL AND lease_until < ?))
                    ORDER BY created_at ASC
                    LIMIT 50""",
-                (user_id, now),
+                (OWNER_ID, now),
             ).fetchall()
 
             claimed_ids = [r["intent_id"] for r in eligible_rows]
@@ -417,7 +409,7 @@ class MemoryOpsMixin(ServiceCore):
             intent_id = r["intent_id"]
             method = r["method"]
             m_payload = json.loads(r["payload_json"])
-            m_payload["user_id"] = user_id
+            m_payload["user_id"] = OWNER_ID
             m_payload["intent_id"] = intent_id
             try:
                 call_method = method if (method.startswith("memory.") or method == "ping") else f"memory.{method}"
@@ -434,8 +426,8 @@ class MemoryOpsMixin(ServiceCore):
 
         # 3. Short write transaction to update final outbox statuses and evaluate prune candidates
         with self.store.transaction() as conn:
-            self._ensure_profile_in_tx(conn, user_id, now)
-            profile = conn.execute("SELECT state_version FROM user_profile WHERE user_id = ?", (user_id,)).fetchone()
+            self._ensure_profile_in_tx(conn, now)
+            profile = conn.execute("SELECT state_version FROM user_profile WHERE user_id = ?", (OWNER_ID,)).fetchone()
             before_version = profile["state_version"]
 
             sent_count = 0
@@ -462,7 +454,7 @@ class MemoryOpsMixin(ServiceCore):
 
             remaining_pending = conn.execute(
                 "SELECT COUNT(*) AS c FROM memory_outbox WHERE user_id = ? AND status = 'pending'",
-                (user_id,),
+                (OWNER_ID,),
             ).fetchone()["c"]
             deferred_count = max(deferred_count, remaining_pending)
 
@@ -480,7 +472,7 @@ class MemoryOpsMixin(ServiceCore):
                      AND record_id NOT IN (
                          SELECT DISTINCT parent_id FROM domain_record WHERE parent_id IS NOT NULL
                      )""",
-                (user_id, cutoff_iso),
+                (OWNER_ID, cutoff_iso),
             )
             purged_superseded_count += cur_domain.rowcount
 
@@ -494,19 +486,19 @@ class MemoryOpsMixin(ServiceCore):
                      AND record_id IN (
                          SELECT DISTINCT parent_id FROM domain_record WHERE parent_id IS NOT NULL
                      )""",
-                (user_id, cutoff_iso),
+                (OWNER_ID, cutoff_iso),
             )
 
             cur_outbox = conn.execute(
                 "DELETE FROM memory_outbox WHERE user_id = ? AND status = 'sent' AND created_at < ?",
-                (user_id, cutoff_iso),
+                (OWNER_ID, cutoff_iso),
             )
             purged_outbox_count += cur_outbox.rowcount
 
             cutoff_date = (now_dt - timedelta(days=prune_days)).strftime("%Y-%m-%d")
             eligible_count = conn.execute(
                 "SELECT COUNT(*) AS c FROM meal_log WHERE user_id = ? AND substr(occurred_at, 1, 10) < ? AND status = 'superseded'",
-                (user_id, cutoff_date),
+                (OWNER_ID, cutoff_date),
             ).fetchone()["c"]
 
             after_version = before_version + 1
@@ -524,7 +516,7 @@ class MemoryOpsMixin(ServiceCore):
                    FROM meal_log
                    WHERE user_id = ? AND status = 'active' AND substr(occurred_at, 1, 10) < ?
                    ORDER BY occurred_at ASC""",
-                (user_id, cutoff_date),
+                (OWNER_ID, cutoff_date),
             ).fetchall()
 
             weeks_map: dict[str, dict[str, Any]] = {}
@@ -614,7 +606,7 @@ class MemoryOpsMixin(ServiceCore):
                         """SELECT record_id, body_json, state_version
                            FROM domain_record
                            WHERE user_id = ? AND kind = 'weekly_nutrition_trend' AND day = ? AND status = 'active'""",
-                        (user_id, iso_week),
+                        (OWNER_ID, iso_week),
                     ).fetchone()
 
                     if existing_trend:
@@ -634,12 +626,12 @@ class MemoryOpsMixin(ServiceCore):
                                 "UPDATE domain_record SET status = 'superseded' WHERE record_id = ?",
                                 (existing_trend["record_id"],),
                             )
-                            new_rec_id = f"trend_nutr_{user_id}_{iso_week}_{uuid.uuid4().hex[:8]}"
+                            new_rec_id = f"trend_nutr_{OWNER_ID}_{iso_week}_{uuid.uuid4().hex[:8]}"
                             conn.execute(
                                 """INSERT INTO domain_record(
                                     record_id, user_id, kind, day, body_json, parent_id, status, causation_id, state_version, created_at
                                 ) VALUES (?, ?, 'weekly_nutrition_trend', ?, ?, ?, 'active', ?, ?, ?)""",
-                                (new_rec_id, user_id, iso_week, trend_body_json, existing_trend["record_id"], operation_id, after_version, now),
+                                (new_rec_id, OWNER_ID, iso_week, trend_body_json, existing_trend["record_id"], operation_id, after_version, now),
                             )
                             consolidated_trends_count += 1
                     else:
@@ -647,15 +639,15 @@ class MemoryOpsMixin(ServiceCore):
                             """SELECT record_id FROM domain_record
                                WHERE user_id = ? AND kind = 'weekly_nutrition_trend' AND day = ?
                                ORDER BY created_at DESC LIMIT 1""",
-                            (user_id, iso_week),
+                            (OWNER_ID, iso_week),
                         ).fetchone()
                         parent_id = prev_trend["record_id"] if prev_trend else None
-                        new_rec_id = f"trend_nutr_{user_id}_{iso_week}_{uuid.uuid4().hex[:8]}"
+                        new_rec_id = f"trend_nutr_{OWNER_ID}_{iso_week}_{uuid.uuid4().hex[:8]}"
                         conn.execute(
                             """INSERT INTO domain_record(
                                 record_id, user_id, kind, day, body_json, parent_id, status, causation_id, state_version, created_at
                             ) VALUES (?, ?, 'weekly_nutrition_trend', ?, ?, ?, 'active', ?, ?, ?)""",
-                            (new_rec_id, user_id, iso_week, trend_body_json, parent_id, operation_id, after_version, now),
+                            (new_rec_id, OWNER_ID, iso_week, trend_body_json, parent_id, operation_id, after_version, now),
                         )
                         consolidated_trends_count += 1
 
@@ -666,7 +658,7 @@ class MemoryOpsMixin(ServiceCore):
                        WHERE user_id = ? AND status = 'active'
                          AND substr(occurred_at, 1, 10) < ?
                          AND foods_json != '[]'""",
-                    (user_id, cutoff_date),
+                    (OWNER_ID, cutoff_date),
                 )
 
             # Check for stale active weekly trends where all historical meals were deleted
@@ -674,7 +666,7 @@ class MemoryOpsMixin(ServiceCore):
                 """SELECT record_id, day, body_json
                    FROM domain_record
                    WHERE user_id = ? AND kind = 'weekly_nutrition_trend' AND status = 'active'""",
-                (user_id,),
+                (OWNER_ID,),
             ).fetchall()
 
             for ex_trend in existing_active_trends:
@@ -690,7 +682,7 @@ class MemoryOpsMixin(ServiceCore):
                             "UPDATE domain_record SET status = 'superseded' WHERE record_id = ?",
                             (ex_trend["record_id"],),
                         )
-                        retract_id = f"trend_nutr_{user_id}_{tr_week}_{uuid.uuid4().hex[:8]}"
+                        retract_id = f"trend_nutr_{OWNER_ID}_{tr_week}_{uuid.uuid4().hex[:8]}"
                         retract_data = {
                             "period_type": "weekly",
                             "iso_week": tr_week,
@@ -704,17 +696,17 @@ class MemoryOpsMixin(ServiceCore):
                             """INSERT INTO domain_record(
                                 record_id, user_id, kind, day, body_json, parent_id, status, causation_id, state_version, created_at
                             ) VALUES (?, ?, 'weekly_nutrition_trend', ?, ?, ?, 'superseded', ?, ?, ?)""",
-                            (retract_id, user_id, tr_week, self.store.json(retract_data), ex_trend["record_id"], operation_id, after_version, now),
+                            (retract_id, OWNER_ID, tr_week, self.store.json(retract_data), ex_trend["record_id"], operation_id, after_version, now),
                         )
                         consolidated_trends_count += 1
 
             conn.execute(
                 "UPDATE user_profile SET state_version = ?, updated_at = ? WHERE user_id = ?",
-                (after_version, now, user_id),
+                (after_version, now, OWNER_ID),
             )
 
             # Calculate remaining due work at the end of transaction
-            due_info = self._calculate_maintenance_due(conn, user_id, now_dt, prune_days=prune_days)
+            due_info = self._calculate_maintenance_due(conn, now_dt, prune_days=prune_days)
             has_more = due_info["due"]
             next_maintenance_key = due_info["maintenance_key"]
             continuation_token = next_maintenance_key
@@ -767,7 +759,6 @@ class MemoryOpsMixin(ServiceCore):
             self._record_operation(
                 conn,
                 operation_id=operation_id,
-                user_id=user_id,
                 idempotency_key=idempotency_key,
                 payload=payload,
                 action="maintain_memory",
@@ -780,13 +771,12 @@ class MemoryOpsMixin(ServiceCore):
     def query_memory(
         self,
         *,
-        user_id: str,
         query: str,
         limit: int = 10,
     ) -> dict[str, Any]:
         """Dual-layer memory query: queries SQLite short-term facts + external MemoryProvider."""
         try:
-            QueryMemoryInput(user_id=user_id, query=query, limit=limit)
+            QueryMemoryInput(query=query, limit=limit)
         except Exception as err:
             raise ValidationError(str(err)) from err
 
@@ -799,7 +789,7 @@ class MemoryOpsMixin(ServiceCore):
         with self.store.connect() as conn:
             profile = conn.execute(
                 "SELECT goals_json, constraints_json, safety_flags_json, state_version FROM user_profile WHERE user_id = ?",
-                (user_id,),
+                (OWNER_ID,),
             ).fetchone()
             version = profile["state_version"] if profile else 0
 
@@ -827,7 +817,7 @@ class MemoryOpsMixin(ServiceCore):
                    FROM domain_record
                    WHERE user_id = ? AND status = 'active'
                    ORDER BY day DESC, created_at DESC LIMIT 50""",
-                (user_id,),
+                (OWNER_ID,),
             ).fetchall()
             for r in records:
                 b_str = r["body_json"] or ""
@@ -858,7 +848,7 @@ class MemoryOpsMixin(ServiceCore):
                    FROM meal_log
                    WHERE user_id = ? AND status = 'active'
                    ORDER BY occurred_at DESC LIMIT 50""",
-                (user_id,),
+                (OWNER_ID,),
             ).fetchall()
             for m in meals:
                 f_str = m["foods_json"] or ""
@@ -879,7 +869,7 @@ class MemoryOpsMixin(ServiceCore):
         obsidian_memories: list[dict[str, Any]] = []
         provider_available = False
         try:
-            prov_res = self.memory_provider.call("query", {"user_id": user_id, "query": query, "limit": limit})
+            prov_res = self.memory_provider.call("query", {"user_id": OWNER_ID, "query": query, "limit": limit})
             if not isinstance(prov_res, dict) or "items" not in prov_res or not isinstance(prov_res.get("items"), list):
                 provider_available = False
                 obsidian_memories = []
@@ -931,9 +921,9 @@ class MemoryOpsMixin(ServiceCore):
             safety_advisory = f"SAFETY_RESTRICTED: Acute red-flag symptom queried ({', '.join(red_flags)}). Clinical safety rules supersede memory heuristics."
             warnings.append(safety_advisory)
 
-        operation_id = f"op_read_mem_{user_id}_{version}"
+        operation_id = f"op_read_mem_{OWNER_ID}_{version}"
         data = {
-            "user_id": user_id,
+            "user_id": OWNER_ID,
             "query": query,
             "sqlite_facts_count": len(sqlite_facts),
             "sqlite_facts": sqlite_facts,
@@ -984,7 +974,6 @@ class MemoryOpsMixin(ServiceCore):
     def _memory_candidate_recently_seen(
         conn: Any,
         *,
-        user_id: str,
         candidate_key: str,
         now: datetime,
     ) -> bool:
@@ -998,7 +987,7 @@ class MemoryOpsMixin(ServiceCore):
                FROM memory_outbox
                WHERE user_id = ? AND method IN ('memory.propose', 'memory.confirm', 'memory.reject')
                ORDER BY created_at DESC LIMIT 200""",
-            (user_id,),
+            (OWNER_ID,),
         ).fetchall()
         for row in rows:
             try:
@@ -1020,7 +1009,7 @@ class MemoryOpsMixin(ServiceCore):
         return False
 
     @staticmethod
-    def _memory_daily_proposal_count(conn: Any, *, user_id: str, tz_name: str, now: datetime) -> int:
+    def _memory_daily_proposal_count(conn: Any, *, tz_name: str, now: datetime) -> int:
         """Count today's proposals without changing state."""
         try:
             tz = ZoneInfo(tz_name)
@@ -1032,7 +1021,7 @@ class MemoryOpsMixin(ServiceCore):
                FROM memory_outbox
                WHERE user_id = ? AND method = 'memory.propose'
                ORDER BY created_at DESC LIMIT 200""",
-            (user_id,),
+            (OWNER_ID,),
         ).fetchall()
         count = 0
         for row in rows:
@@ -1049,7 +1038,6 @@ class MemoryOpsMixin(ServiceCore):
     def get_memory_suggestions(
         self,
         *,
-        user_id: str,
         date: str,
         window_days: int = 30,
         limit: int = 3,
@@ -1063,7 +1051,6 @@ class MemoryOpsMixin(ServiceCore):
         """
         try:
             validated = GetMemorySuggestionsInput(
-                user_id=user_id,
                 date=date,
                 window_days=window_days,
                 limit=limit,
@@ -1080,12 +1067,12 @@ class MemoryOpsMixin(ServiceCore):
         with self.store.connect() as conn:
             profile = conn.execute(
                 "SELECT timezone, state_version FROM user_profile WHERE user_id = ?",
-                (validated.user_id,),
+                (OWNER_ID,),
             ).fetchone()
             tz_name = str(profile["timezone"] if profile and profile["timezone"] else "Asia/Shanghai")
             version = int(profile["state_version"] if profile else 0)
             daily_proposal_count = self._memory_daily_proposal_count(
-                conn, user_id=validated.user_id, tz_name=tz_name, now=now
+                conn, tz_name=tz_name, now=now
             )
 
             meal_groups: dict[tuple[str, tuple[str, ...]], dict[str, Any]] = {}
@@ -1096,7 +1083,7 @@ class MemoryOpsMixin(ServiceCore):
                    FROM meal_log
                    WHERE user_id = ? AND occurred_at >= ? AND occurred_at < ? AND status = 'active'
                    ORDER BY occurred_at ASC, meal_id ASC""",
-                (validated.user_id, q_start, q_end),
+                (OWNER_ID, q_start, q_end),
             ).fetchall()
             for row in meal_rows:
                 try:
@@ -1133,7 +1120,7 @@ class MemoryOpsMixin(ServiceCore):
                    WHERE user_id = ? AND kind IN ('workout', 'workout_log') AND status = 'active'
                      AND day >= ? AND day <= ?
                    ORDER BY day ASC, record_id ASC""",
-                (validated.user_id, start_text, end_text),
+                (OWNER_ID, start_text, end_text),
             ).fetchall()
             for row in workout_rows:
                 day = str(row["day"] or "")[:10]
@@ -1189,7 +1176,7 @@ class MemoryOpsMixin(ServiceCore):
                 fingerprint = "|".join(self._memory_name_key(n) for n in names)
                 candidate_key = f"meal-pattern:{self._memory_name_key(group['meal_type'])}:{hashlib.sha256(fingerprint.encode('utf-8')).hexdigest()[:12]}"
                 if self._memory_candidate_recently_seen(
-                    conn, user_id=validated.user_id, candidate_key=candidate_key, now=now
+                    conn, candidate_key=candidate_key, now=now
                 ):
                     continue
                 source_ids = [rid for _, rid in sorted(group["records"], key=lambda item: (item[0], item[1]))]
@@ -1222,7 +1209,7 @@ class MemoryOpsMixin(ServiceCore):
                 fingerprint = "|".join(self._memory_name_key(n) for n in names)
                 candidate_key = f"workout-pattern:{hashlib.sha256(fingerprint.encode('utf-8')).hexdigest()[:12]}"
                 if self._memory_candidate_recently_seen(
-                    conn, user_id=validated.user_id, candidate_key=candidate_key, now=now
+                    conn, candidate_key=candidate_key, now=now
                 ):
                     continue
                 source_ids = [rid for _, rid in sorted(group["records"], key=lambda item: (item[0], item[1]))]
@@ -1260,7 +1247,7 @@ class MemoryOpsMixin(ServiceCore):
         else:
             candidates = candidates[: min(validated.limit, 3 - daily_proposal_count)]
         data = {
-            "user_id": validated.user_id,
+            "user_id": OWNER_ID,
             "date": validated.date,
             "window_days": validated.window_days,
             "suggestions": candidates,
@@ -1273,7 +1260,7 @@ class MemoryOpsMixin(ServiceCore):
             ),
         }
         return self._response(
-            f"op_read_memory_suggestions_{validated.user_id}_{version}",
+            f"op_read_memory_suggestions_{OWNER_ID}_{version}",
             "success",
             data,
             version,

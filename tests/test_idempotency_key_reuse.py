@@ -38,7 +38,6 @@ class IdempotencyKeyReuseTests(unittest.TestCase):
 
     def _log_meal(self, key: str, *, day: str = DAY, kcal: int = 500) -> dict:
         return self.service.log_meal(
-            user_id=USER,
             occurred_at=f"{day}T12:00:00+08:00",
             meal_type="lunch",
             foods=[{"name": "rice"}],
@@ -89,22 +88,21 @@ class IdempotencyKeyReuseTests(unittest.TestCase):
         self._log_meal("today")
         self.clock.advance(timedelta(days=2))
         res = self.service.log_daily_metrics(
-            user_id=USER, date="2026-09-07", metrics={"sleep_hours": 7.5}, idempotency_key="today"
+            date="2026-09-07", metrics={"sleep_hours": 7.5}, idempotency_key="today"
         )
         self.assertEqual(res["status"], "success")
 
     def test_date_stable_review_key_recomputes_after_new_facts(self) -> None:
         self._log_meal("lunch-a", kcal=500)
-        first = self.service.daily_review(user_id=USER, date=DAY, idempotency_key=f"review-{DAY}")
+        first = self.service.daily_review(date=DAY, idempotency_key=f"review-{DAY}")
         self.assertEqual(first["data"]["nutrition_analysis"]["intake_kcal_range"], [500, 600])
 
         # A genuine retry with nothing changed in between replays the cached review.
-        retry = self.service.daily_review(user_id=USER, date=DAY, idempotency_key=f"review-{DAY}")
+        retry = self.service.daily_review(date=DAY, idempotency_key=f"review-{DAY}")
         self.assertEqual(retry, first)
 
         # A late dinner makes the cached review stale; the same key must not hide it.
         self.service.log_meal(
-            user_id=USER,
             occurred_at=f"{DAY}T19:00:00+08:00",
             meal_type="dinner",
             foods=[{"name": "fish"}],
@@ -112,31 +110,31 @@ class IdempotencyKeyReuseTests(unittest.TestCase):
             kcal_high=400,
             idempotency_key="dinner-a",
         )
-        refreshed = self.service.daily_review(user_id=USER, date=DAY, idempotency_key=f"review-{DAY}")
+        refreshed = self.service.daily_review(date=DAY, idempotency_key=f"review-{DAY}")
         self.assertNotEqual(refreshed["operation_id"], first["operation_id"])
         self.assertEqual(refreshed["data"]["nutrition_analysis"]["intake_kcal_range"], [800, 1000])
 
-        again = self.service.daily_review(user_id=USER, date=DAY, idempotency_key=f"review-{DAY}")
+        again = self.service.daily_review(date=DAY, idempotency_key=f"review-{DAY}")
         self.assertEqual(again, refreshed)
 
     def test_plan_tomorrow_replays_only_while_state_is_unchanged(self) -> None:
-        first = self.service.plan_tomorrow(user_id=USER, date=DAY, idempotency_key="plan")
-        self.assertEqual(self.service.plan_tomorrow(user_id=USER, date=DAY, idempotency_key="plan"), first)
+        first = self.service.plan_tomorrow(date=DAY, idempotency_key="plan")
+        self.assertEqual(self.service.plan_tomorrow(date=DAY, idempotency_key="plan"), first)
 
         self.service.log_daily_metrics(
-            user_id=USER, date=DAY, metrics={"sleep_hours": 5.0, "fatigue_level": 8}, idempotency_key="metrics"
+            date=DAY, metrics={"sleep_hours": 5.0, "fatigue_level": 8}, idempotency_key="metrics"
         )
-        refreshed = self.service.plan_tomorrow(user_id=USER, date=DAY, idempotency_key="plan")
+        refreshed = self.service.plan_tomorrow(date=DAY, idempotency_key="plan")
         self.assertNotEqual(refreshed["data"]["plan_id"], first["data"]["plan_id"])
 
     def test_memory_proposal_keys_are_never_recycled(self) -> None:
         self.service.propose_memory_candidate(
-            user_id=USER, method="memory.propose", payload={"text": "a"}, idempotency_key="remember"
+            method="memory.propose", payload={"text": "a"}, idempotency_key="remember"
         )
         self.clock.advance(timedelta(days=5))
         with self.assertRaises(IdempotencyMismatchError):
             self.service.propose_memory_candidate(
-                user_id=USER, method="memory.propose", payload={"text": "b"}, idempotency_key="remember"
+                method="memory.propose", payload={"text": "b"}, idempotency_key="remember"
             )
 
 

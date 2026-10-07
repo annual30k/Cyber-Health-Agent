@@ -7,6 +7,7 @@ Can expose full domain toolset when CYBER_HEALTH_ALLOW_ALL_TOOLS=1.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import os
@@ -25,8 +26,7 @@ from cyber_health import (
 )
 from cyber_health.memory import UnavailableMemoryProvider
 from cyber_health.obsidian_memory_provider import ObsidianMemoryProvider
-
-SINGLE_USER_ID = "owner"
+from cyber_health.store import LEGACY_PARTITION_MESSAGE, SINGLE_USER_ID, LegacyPartitionError, has_foreign_partitions
 
 logger = logging.getLogger("cyber_health_mcp")
 
@@ -37,23 +37,8 @@ def assert_single_user_database(database_path: Path) -> None:
         return
     uri = database_path.resolve().as_uri() + "?mode=ro"
     with closing(sqlite3.connect(uri, uri=True)) as conn:
-        tables = {
-            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        }
-        for table in (
-            "user_profile", "meal_log", "schedule_event", "operation_log",
-            "domain_record", "memory_outbox",
-        ):
-            if table not in tables:
-                continue
-            foreign = conn.execute(
-                f"SELECT 1 FROM {table} WHERE user_id <> ? LIMIT 1", (SINGLE_USER_ID,)
-            ).fetchone()
-            if foreign:
-                raise RuntimeError(
-                    "Legacy user_id partitions found in the Cyber Health database. "
-                    "Back up and migrate this database using 'cyber-health migrate-owner' before starting."
-                )
+        if has_foreign_partitions(conn):
+            raise LegacyPartitionError(LEGACY_PARTITION_MESSAGE)
 
 
 CYBER_HEALTH_HOST_INSTRUCTIONS = (
@@ -171,7 +156,6 @@ def create_mcp_server(
 ) -> FastMCP:
     db_path = Path(database_path) if database_path else get_default_db_path()
     assert_single_user_database(db_path)
-    user_id = SINGLE_USER_ID
     if memory_provider is None:
         memory_provider = build_memory_provider(
             provider_name=memory_provider_name,
@@ -199,7 +183,7 @@ def create_mcp_server(
         instructions=CYBER_HEALTH_HOST_INSTRUCTIONS,
     )
 
-    def _err_envelope(err: Exception, action: str, user_id: str | None = None) -> dict[str, Any]:
+    def _err_envelope(err: Exception, action: str) -> dict[str, Any]:
         code = getattr(err, "code", None)
         if code is None:
             if isinstance(err, (ValueError, TypeError)):
@@ -209,12 +193,9 @@ def create_mcp_server(
                 # Unexpected failures are returned as an envelope; keep the traceback on stderr.
                 logger.error("Unexpected error during %s", action, exc_info=err)
         version = 0
-        if user_id:
-            try:
-                prof = service.get_profile(user_id)
-                version = prof.get("state_version", 0)
-            except Exception:  # noqa: BLE001, S110 - a failed version lookup must not mask the original error
-                pass
+        # A failed version lookup must not mask the original error.
+        with contextlib.suppress(Exception):
+            version = service.get_profile().get("state_version", 0)
 
         if hasattr(err, "errors") and callable(err.errors):
             issues = []
@@ -238,8 +219,8 @@ def create_mcp_server(
             "state_version": version,
         }
 
-    def _onboarding_gate(user_id: str, capability: str) -> dict[str, Any] | None:
-        profile = service.get_profile(user_id)
+    def _onboarding_gate(capability: str) -> dict[str, Any] | None:
+        profile = service.get_profile()
         onboarding = profile["onboarding"]
         readiness_field = {
             "training": "training_plan_ready",
@@ -250,14 +231,14 @@ def create_mcp_server(
         if profile.get("safety_mode") == "restricted" or onboarding[readiness_field]:
             return None
         data = {
-            "user_id": user_id,
+            "user_id": SINGLE_USER_ID,
             "onboarding_required": True,
             "blocked_capability": capability,
             "plan": None,
             "onboarding": onboarding,
         }
         return {
-            "operation_id": f"op_onboarding_{user_id}_{profile['state_version']}",
+            "operation_id": f"op_onboarding_{SINGLE_USER_ID}_{profile['state_version']}",
             "status": "partial",
             "data": data,
             "warnings": [
@@ -288,9 +269,9 @@ def create_mcp_server(
         diet or training plan. Never guess missing health data. This read does not mutate data.
         """
         try:
-            return service.get_profile(user_id=user_id)
+            return service.get_profile()
         except Exception as err:  # noqa: BLE001 - MCP tool boundary: every failure becomes an error envelope
-            return _err_envelope(err, "get_profile", user_id)
+            return _err_envelope(err, "get_profile")
 
     @mcp.tool(
         annotations=ToolAnnotations(
@@ -321,7 +302,6 @@ def create_mcp_server(
         """
         try:
             return service.update_profile(
-                user_id=user_id,
                 idempotency_key=idempotency_key,
                 goals=goals,
                 constraints=constraints,
@@ -332,7 +312,7 @@ def create_mcp_server(
                 expected_state_version=expected_state_version,
             )
         except (CyberHealthError, ValueError, TypeError) as err:
-            return _err_envelope(err, "update_profile", user_id)
+            return _err_envelope(err, "update_profile")
 
     @mcp.tool(
         annotations=ToolAnnotations(
@@ -349,9 +329,9 @@ def create_mcp_server(
         exact meal/workout facts the nightly Agent must collect before finalizing.
         """
         try:
-            return service.get_today(user_id=user_id, day=date)
+            return service.get_today(day=date)
         except Exception as err:  # noqa: BLE001 - MCP tool boundary: every failure becomes an error envelope
-            return _err_envelope(err, "get_today", user_id)
+            return _err_envelope(err, "get_today")
 
     @mcp.tool(
         annotations=ToolAnnotations(
@@ -386,7 +366,6 @@ def create_mcp_server(
         """
         try:
             return service.log_meal(
-                user_id=user_id,
                 occurred_at=occurred_at,
                 meal_type=meal_type,
                 foods=foods,
@@ -403,7 +382,7 @@ def create_mcp_server(
                 correction_reason=correction_reason,
             )
         except (CyberHealthError, ValueError) as err:
-            return _err_envelope(err, "log_meal", user_id)
+            return _err_envelope(err, "log_meal")
 
     @mcp.tool(
         annotations=ToolAnnotations(
@@ -415,9 +394,9 @@ def create_mcp_server(
     )
     def cyber_health_get_audit_trail(limit: int = 100) -> dict[str, Any]:
         """Read-only query for operation log, revision chain, and state version transitions."""
-        rows = service.get_audit_trail(user_id=user_id, limit=limit)
+        rows = service.get_audit_trail(limit=limit)
         return {
-            "user_id": user_id,
+            "user_id": SINGLE_USER_ID,
             "operations": rows,
             "count": len(rows),
         }
@@ -451,10 +430,10 @@ def create_mcp_server(
         Pure derived read returning dynamic eligibility, suppression reasons, and compensation flags.
         Set include_inactive=True to receive a complete snapshot with tombstones for host timer revocation.
         """
-        prof = service.get_profile(user_id)
-        events = service.get_schedule(user_id=user_id, date=date, include_inactive=include_inactive)
+        prof = service.get_profile()
+        events = service.get_schedule(date=date, include_inactive=include_inactive)
         return {
-            "user_id": user_id,
+            "user_id": SINGLE_USER_ID,
             "date": date,
             "timezone": prof.get("timezone", "Asia/Shanghai"),
             "events": events,
@@ -483,14 +462,13 @@ def create_mcp_server(
             """Log daily morning/evening metrics (weight, sleep, fatigue, soreness, steps) and evaluate recovery score."""
             try:
                 return service.log_daily_metrics(
-                    user_id=user_id,
                     date=date,
                     metrics=metrics,
                     idempotency_key=idempotency_key,
                     expected_state_version=expected_state_version,
                 )
             except (CyberHealthError, ValueError) as err:
-                return _err_envelope(err, "log_daily_metrics", user_id)
+                return _err_envelope(err, "log_daily_metrics")
 
         @mcp.tool(
             annotations=ToolAnnotations(
@@ -509,14 +487,13 @@ def create_mcp_server(
             """Soft-delete an erroneous meal log and recalculate today's nutritional totals."""
             try:
                 return service.delete_meal(
-                    user_id=user_id,
                     meal_id=meal_id,
                     idempotency_key=idempotency_key,
                     reason=reason,
                     expected_state_version=expected_state_version,
                 )
             except (CyberHealthError, ValueError) as err:
-                return _err_envelope(err, "delete_meal", user_id)
+                return _err_envelope(err, "delete_meal")
 
         @mcp.tool(
             annotations=ToolAnnotations(
@@ -552,7 +529,6 @@ def create_mcp_server(
             """
             try:
                 return service.log_workout(
-                    user_id=user_id,
                     date=date,
                     idempotency_key=idempotency_key,
                     session_id=session_id,
@@ -566,7 +542,7 @@ def create_mcp_server(
                     expected_state_version=expected_state_version,
                 )
             except (CyberHealthError, ValueError) as err:
-                return _err_envelope(err, "log_workout", user_id)
+                return _err_envelope(err, "log_workout")
 
         @mcp.tool(
             annotations=ToolAnnotations(
@@ -589,18 +565,17 @@ def create_mcp_server(
             in daily_review_readiness; never interpret unrecorded facts as zero intake or rest.
             """
             try:
-                gate = _onboarding_gate(user_id, "combined")
+                gate = _onboarding_gate("combined")
                 if gate:
                     return gate
                 return service.daily_review(
-                    user_id=user_id,
                     date=date,
                     idempotency_key=idempotency_key,
                     user_notes=user_notes,
                     expected_state_version=expected_state_version,
                 )
             except (CyberHealthError, ValueError) as err:
-                return _err_envelope(err, "daily_review", user_id)
+                return _err_envelope(err, "daily_review")
 
         @mcp.tool(
             annotations=ToolAnnotations(
@@ -618,18 +593,17 @@ def create_mcp_server(
         ) -> dict[str, Any]:
             """Generate or commit tomorrow's plan only after first-run intake is complete."""
             try:
-                gate = _onboarding_gate(user_id, "combined")
+                gate = _onboarding_gate("combined")
                 if gate:
                     return gate
                 return service.plan_tomorrow(
-                    user_id=user_id,
                     date=date,
                     idempotency_key=idempotency_key,
                     commit=commit,
                     expected_state_version=expected_state_version,
                 )
             except (CyberHealthError, ValueError) as err:
-                return _err_envelope(err, "plan_tomorrow", user_id)
+                return _err_envelope(err, "plan_tomorrow")
 
         @mcp.tool(
             annotations=ToolAnnotations(
@@ -647,13 +621,12 @@ def create_mcp_server(
             """Acknowledge or skip a scheduled event so it will not be repeatedly triggered."""
             try:
                 return service.acknowledge_schedule_event(
-                    user_id=user_id,
                     event_id=event_id,
                     action=action,
                     idempotency_key=idempotency_key or f"ack_{uuid.uuid4().hex}",
                 )
             except (CyberHealthError, ValueError) as err:
-                return _err_envelope(err, "acknowledge_schedule_event", user_id)
+                return _err_envelope(err, "acknowledge_schedule_event")
 
         @mcp.tool(
             annotations=ToolAnnotations(
@@ -670,12 +643,11 @@ def create_mcp_server(
             """Drain deferred memory outbox intents and prune expired short-term records."""
             try:
                 return service.maintain_memory(
-                    user_id=user_id,
                     idempotency_key=idempotency_key,
                     prune_days=prune_days,
                 )
             except (CyberHealthError, ValueError, TypeError) as err:
-                return _err_envelope(err, "maintain_memory", user_id)
+                return _err_envelope(err, "maintain_memory")
 
         @mcp.tool(
             annotations=ToolAnnotations(
@@ -688,9 +660,9 @@ def create_mcp_server(
         def cyber_health_get_remaining_calories(date: str) -> dict[str, Any]:
             """Query remaining daily calorie and protein budget with next-meal recommendation."""
             try:
-                return service.get_remaining_calories(user_id=user_id, date=date)
+                return service.get_remaining_calories(date=date)
             except Exception as err:  # noqa: BLE001 - MCP tool boundary: every failure becomes an error envelope
-                return _err_envelope(err, "get_remaining_calories", user_id)
+                return _err_envelope(err, "get_remaining_calories")
 
         @mcp.tool(
             annotations=ToolAnnotations(
@@ -708,18 +680,17 @@ def create_mcp_server(
         ) -> dict[str, Any]:
             """Generate training only after training intake is ready; otherwise return questions."""
             try:
-                gate = _onboarding_gate(user_id, "training")
+                gate = _onboarding_gate("training")
                 if gate:
                     return gate
                 return service.get_training_plan(
-                    user_id=user_id,
                     date=date,
                     equipment=equipment,
                     target_duration_min=target_duration_min,
                     evidence_window_days=evidence_window_days,
                 )
             except Exception as err:  # noqa: BLE001 - MCP tool boundary: every failure becomes an error envelope
-                return _err_envelope(err, "get_training_plan", user_id)
+                return _err_envelope(err, "get_training_plan")
 
         @mcp.tool(
             annotations=ToolAnnotations(
@@ -740,7 +711,6 @@ def create_mcp_server(
             """Minimal workout check-in with red-flag detection and progression state update."""
             try:
                 return service.complete_workout(
-                    user_id=user_id,
                     date=date,
                     idempotency_key=idempotency_key,
                     completed_exercises=completed_exercises,
@@ -749,7 +719,7 @@ def create_mcp_server(
                     completion_rate=completion_rate,
                 )
             except (CyberHealthError, ValueError) as err:
-                return _err_envelope(err, "complete_workout", user_id)
+                return _err_envelope(err, "complete_workout")
 
         @mcp.tool(
             annotations=ToolAnnotations(
@@ -774,7 +744,6 @@ def create_mcp_server(
             """Confirm a proposed weight/rep increment for an exercise, recording revision chain."""
             try:
                 return service.confirm_training_progression(
-                    user_id=user_id,
                     exercise_name=exercise_name,
                     idempotency_key=idempotency_key,
                     confirmed_weight_kg=confirmed_weight_kg,
@@ -787,7 +756,7 @@ def create_mcp_server(
                     expected_state_version=expected_state_version,
                 )
             except (CyberHealthError, ValueError, TypeError) as err:
-                return _err_envelope(err, "confirm_training_progression", user_id)
+                return _err_envelope(err, "confirm_training_progression")
 
         @mcp.tool(
             annotations=ToolAnnotations(
@@ -806,14 +775,13 @@ def create_mcp_server(
             """Support on-the-fly exercise substitution preserving movement pattern and volume."""
             try:
                 return service.substitute_exercise(
-                    user_id=user_id,
                     original_exercise=original_exercise,
                     equipment=equipment,
                     discomfort_joint=discomfort_joint,
                     reason=reason,
                 )
             except Exception as err:  # noqa: BLE001 - MCP tool boundary: every failure becomes an error envelope
-                return _err_envelope(err, "substitute_exercise", user_id)
+                return _err_envelope(err, "substitute_exercise")
 
         @mcp.tool(
             annotations=ToolAnnotations(
@@ -844,9 +812,9 @@ def create_mcp_server(
         def cyber_health_export_data() -> dict[str, Any]:
             """Export user health facts, revisions, and operation logs into portable schema snapshot."""
             try:
-                return service.export_data(user_id=user_id)
+                return service.export_data()
             except Exception as err:  # noqa: BLE001 - MCP tool boundary: every failure becomes an error envelope
-                return _err_envelope(err, "export_data", user_id)
+                return _err_envelope(err, "export_data")
 
         @mcp.tool(
             annotations=ToolAnnotations(
@@ -863,12 +831,11 @@ def create_mcp_server(
             """Import portable health facts snapshot back into SQLite with strict validation and rollback."""
             try:
                 return service.import_data(
-                    user_id=user_id,
                     data=data,
                     idempotency_key=idempotency_key,
                 )
             except (CyberHealthError, ValueError, TypeError) as err:
-                return _err_envelope(err, "import_data", user_id)
+                return _err_envelope(err, "import_data")
 
         @mcp.tool(
             annotations=ToolAnnotations(
@@ -899,7 +866,6 @@ def create_mcp_server(
                 call_payload["confirmed"] = True
             try:
                 return service.memory_action(
-                    user_id=user_id,
                     action_type=action_type,
                     idempotency_key=idempotency_key,
                     candidate_id=candidate_id,
@@ -908,7 +874,7 @@ def create_mcp_server(
                     payload=call_payload,
                 )
             except (CyberHealthError, ValueError, TypeError) as err:
-                return _err_envelope(err, "memory_action", user_id)
+                return _err_envelope(err, "memory_action")
 
         @mcp.tool(
             annotations=ToolAnnotations(
@@ -929,12 +895,11 @@ def create_mcp_server(
             """
             try:
                 return service.schedule_daily_reminders(
-                    user_id=user_id,
                     date=date,
                     idempotency_key=idempotency_key,
                 )
             except (CyberHealthError, ValueError) as err:
-                return _err_envelope(err, "schedule_daily_reminders", user_id)
+                return _err_envelope(err, "schedule_daily_reminders")
 
         @mcp.tool(
             annotations=ToolAnnotations(
@@ -955,7 +920,6 @@ def create_mcp_server(
             """Update a scheduled event's status, delivery, or postponed time window."""
             try:
                 return service.update_schedule_event(
-                    user_id=user_id,
                     event_id=event_id,
                     action=action,
                     idempotency_key=idempotency_key,
@@ -964,7 +928,7 @@ def create_mcp_server(
                     note=note,
                 )
             except (CyberHealthError, ValueError) as err:
-                return _err_envelope(err, "update_schedule_event", user_id)
+                return _err_envelope(err, "update_schedule_event")
 
         @mcp.tool(
             annotations=ToolAnnotations(
@@ -980,9 +944,9 @@ def create_mcp_server(
         ) -> dict[str, Any]:
             """Dual-layer memory query retrieving short-term SQLite facts and long-term Obsidian memories."""
             try:
-                return service.query_memory(user_id=user_id, query=query, limit=limit)
+                return service.query_memory(query=query, limit=limit)
             except Exception as err:  # noqa: BLE001 - MCP tool boundary: every failure becomes an error envelope
-                return _err_envelope(err, "query_memory", user_id)
+                return _err_envelope(err, "query_memory")
 
         @mcp.tool(
             annotations=ToolAnnotations(
@@ -1000,13 +964,12 @@ def create_mcp_server(
             """Read-only discovery of repeated health patterns worth asking the user to remember."""
             try:
                 return service.get_memory_suggestions(
-                    user_id=user_id,
                     date=date,
                     window_days=window_days,
                     limit=limit,
                 )
             except Exception as err:  # noqa: BLE001 - MCP tool boundary: every failure becomes an error envelope
-                return _err_envelope(err, "get_memory_suggestions", user_id)
+                return _err_envelope(err, "get_memory_suggestions")
 
     return mcp
 

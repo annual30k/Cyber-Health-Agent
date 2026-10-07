@@ -24,7 +24,7 @@ class OnboardingFlowTests(unittest.TestCase):
     def test_new_profile_returns_grouped_intake_without_creating_a_row(self) -> None:
         service = CyberHealthService(self.db_path)
 
-        profile = service.get_profile("new-user")
+        profile = service.get_profile()
 
         self.assertFalse(profile["exists"])
         self.assertEqual(profile["onboarding"]["status"], "required")
@@ -34,7 +34,7 @@ class OnboardingFlowTests(unittest.TestCase):
         self.assertIn("constraints.weight_kg", profile["onboarding"]["missing_fields"])
         self.assertIn("goals.goal_type", profile["onboarding"]["missing_fields"])
         automation = profile["daily_review_automation"]
-        self.assertEqual(automation["declaration_key"], "cyber-health:daily-review:new-user")
+        self.assertEqual(automation["declaration_key"], "cyber-health:daily-review:owner")
         self.assertEqual(automation["schedule"]["expression"], "30 21 * * *")
         workflow = " ".join(automation["workflow"])
         self.assertIn("session search/history", workflow)
@@ -102,7 +102,7 @@ class OnboardingFlowTests(unittest.TestCase):
     def test_today_reports_questions_for_unverified_meals_and_workout(self) -> None:
         service = CyberHealthService(self.db_path)
 
-        today = service.get_today("new-user", "2026-09-07")
+        today = service.get_today("2026-09-07")
         readiness = today["daily_review_readiness"]
 
         self.assertFalse(readiness["ready_to_finalize"])
@@ -113,7 +113,6 @@ class OnboardingFlowTests(unittest.TestCase):
     def test_nightly_review_has_gap_workout_and_detailed_tomorrow_plan(self) -> None:
         service = CyberHealthService(self.db_path)
         service.update_profile(
-            user_id="review-user",
             idempotency_key="profile",
             goals={
                 "goal_type": "fat_loss",
@@ -136,7 +135,6 @@ class OnboardingFlowTests(unittest.TestCase):
         ]
         for index, (meal_type, kcal_low, kcal_high, protein_low, protein_high) in enumerate(meals):
             service.log_meal(
-                user_id="review-user",
                 occurred_at=f"2026-09-07T{8 + index * 5:02d}:00:00+08:00",
                 meal_type=meal_type,
                 foods=[{"name": meal_type, "amount_g": {"low": 100, "high": 120}}],
@@ -147,7 +145,6 @@ class OnboardingFlowTests(unittest.TestCase):
                 idempotency_key=f"meal-{index}",
             )
         service.log_workout(
-            user_id="review-user",
             date="2026-09-07",
             planned_exercises=["Dumbbell Goblet Squat"],
             actual_sets=[{"exercise": "Dumbbell Goblet Squat", "sets": 3, "reps": 10}],
@@ -156,9 +153,8 @@ class OnboardingFlowTests(unittest.TestCase):
             idempotency_key="workout",
         )
 
-        ready = service.get_today("review-user", "2026-09-07")["daily_review_readiness"]
+        ready = service.get_today("2026-09-07")["daily_review_readiness"]
         review = service.daily_review(
-            user_id="review-user",
             date="2026-09-07",
             idempotency_key="review",
         )["data"]
@@ -178,7 +174,6 @@ class OnboardingFlowTests(unittest.TestCase):
             b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
         ).decode()
         saved = service.log_workout(
-            user_id="wearable-user",
             date="2026-09-07",
             idempotency_key="wearable-walk",
             planned_exercises=["室内步行（爬坡）"],
@@ -200,7 +195,6 @@ class OnboardingFlowTests(unittest.TestCase):
         self.assertTrue(saved["data"]["source_image"]["sha256"])
 
         corrected = service.log_workout(
-            user_id="wearable-user",
             date="2026-09-07",
             session_id=saved["data"]["session_id"],
             idempotency_key="wearable-walk-correction",
@@ -209,12 +203,12 @@ class OnboardingFlowTests(unittest.TestCase):
         self.assertEqual(corrected["data"]["session_id"], saved["data"]["session_id"])
 
         reloaded = CyberHealthService(self.db_path)
-        sessions = reloaded.get_today("wearable-user", "2026-09-07")["daily_review_readiness"]["workout_sessions"]
+        sessions = reloaded.get_today("2026-09-07")["daily_review_readiness"]["workout_sessions"]
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0]["activity_summary"]["distance_km"], 4.61)
         # Explicit correction replaces the summary while preserving source evidence.
         self.assertTrue(sessions[0]["source_image_saved"])
-        exported = reloaded.export_data(user_id="wearable-user")
+        exported = reloaded.export_data()
         body = exported["facts"]["domain_records"][0]["body_json"]
         self.assertIn(image_b64, body)
 

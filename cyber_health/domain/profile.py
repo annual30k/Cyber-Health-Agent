@@ -10,7 +10,7 @@ from typing import Any
 
 from ..errors import ConflictError, ValidationError
 from ..models import UpdateProfileInput
-from .base import ServiceCore
+from .base import OWNER_ID, ServiceCore
 from .catalog import RED_FLAG_KEYWORDS
 
 
@@ -139,7 +139,6 @@ class ProfileMixin(ServiceCore):
 
     @staticmethod
     def daily_review_automation_spec(
-        user_id: str,
         timezone: str,
         constraints: dict[str, Any] | None,
     ) -> dict[str, Any]:
@@ -158,7 +157,7 @@ class ProfileMixin(ServiceCore):
         assert match is not None
         hour, minute = match.group(1), match.group(2)
         return {
-            "declaration_key": f"cyber-health:daily-review:{user_id}",
+            "declaration_key": f"cyber-health:daily-review:{OWNER_ID}",
             "enabled": enabled,
             "schedule": {"kind": "cron", "expression": f"{minute} {hour} * * *", "timezone": timezone},
             "target_agent": "health-manager",
@@ -176,17 +175,17 @@ class ProfileMixin(ServiceCore):
             "delivery_policy": "Proactively contact the user only for the nightly review; never treat missing data as zero intake or a rest day.",
         }
 
-    def get_profile(self, user_id: str) -> dict[str, Any]:
+    def get_profile(self) -> dict[str, Any]:
         with self.store.connect() as conn:
             row = conn.execute(
                 """SELECT user_id, timezone, goals_json, constraints_json, safety_flags_json,
                           safety_mode, deload_until, state_version
                    FROM user_profile WHERE user_id = ?""",
-                (user_id,),
+                (OWNER_ID,),
             ).fetchone()
             if not row:
                 data = {
-                    "user_id": user_id,
+                    "user_id": OWNER_ID,
                     "timezone": "Asia/Shanghai",
                     "goals": {},
                     "constraints": {},
@@ -210,10 +209,10 @@ class ProfileMixin(ServiceCore):
                 }
             data["onboarding"] = self.assess_onboarding(data["goals"], data["constraints"])
             data["daily_review_automation"] = self.daily_review_automation_spec(
-                user_id, data["timezone"], data["constraints"]
+                data["timezone"], data["constraints"]
             )
             return {
-                "operation_id": f"op_read_profile_{user_id}_{data['state_version']}",
+                "operation_id": f"op_read_profile_{OWNER_ID}_{data['state_version']}",
                 "status": "success",
                 "data": data,
                 "warnings": [],
@@ -225,7 +224,6 @@ class ProfileMixin(ServiceCore):
     def update_profile(
         self,
         *,
-        user_id: str,
         idempotency_key: str,
         goals: dict[str, Any] | None = None,
         constraints: dict[str, Any] | None = None,
@@ -237,7 +235,6 @@ class ProfileMixin(ServiceCore):
     ) -> dict[str, Any]:
         try:
             validated = UpdateProfileInput(
-                user_id=user_id,
                 idempotency_key=idempotency_key,
                 goals=goals,
                 constraints=constraints,
@@ -252,7 +249,7 @@ class ProfileMixin(ServiceCore):
 
         payload = {
             "action": "update_profile",
-            "user_id": user_id,
+            "user_id": OWNER_ID,
             "goals": validated.goals,
             "constraints": constraints,
             "timezone": timezone,
@@ -264,12 +261,12 @@ class ProfileMixin(ServiceCore):
         now, operation_id = self._now(), f"op_{uuid.uuid4().hex}"
 
         with self.store.transaction() as conn:
-            existing = self._check_idempotency(conn, user_id, idempotency_key, "update_profile", payload)
+            existing = self._check_idempotency(conn, idempotency_key, "update_profile", payload)
             if existing:
                 return existing
 
-            self._ensure_profile_in_tx(conn, user_id, now)
-            row = conn.execute("SELECT * FROM user_profile WHERE user_id = ?", (user_id,)).fetchone()
+            self._ensure_profile_in_tx(conn, now)
+            row = conn.execute("SELECT * FROM user_profile WHERE user_id = ?", (OWNER_ID,)).fetchone()
             before_version = row["state_version"]
 
             if expected_state_version is not None and expected_state_version != before_version:
@@ -326,12 +323,12 @@ class ProfileMixin(ServiceCore):
                     deload_until,
                     after_version,
                     now,
-                    user_id,
+                    OWNER_ID,
                 ),
             )
 
             data = {
-                "user_id": user_id,
+                "user_id": OWNER_ID,
                 "timezone": new_tz,
                 "goals": new_goals,
                 "constraints": new_constraints,
@@ -341,7 +338,7 @@ class ProfileMixin(ServiceCore):
             }
             data["onboarding"] = self.assess_onboarding(new_goals, new_constraints)
             data["daily_review_automation"] = self.daily_review_automation_spec(
-                user_id, new_tz, new_constraints
+                new_tz, new_constraints
             )
             response = self._response(
                 operation_id,
@@ -353,7 +350,6 @@ class ProfileMixin(ServiceCore):
             self._record_operation(
                 conn,
                 operation_id=operation_id,
-                user_id=user_id,
                 idempotency_key=idempotency_key,
                 payload=payload,
                 action="update_profile",

@@ -31,7 +31,6 @@ class OutboxConcurrencyExtendedTests(unittest.TestCase):
     def test_concurrent_same_key_same_payload_replay(self) -> None:
         """Exact repeat returns cached result without invoking Provider a second time."""
         res1 = self.service.propose_memory_candidate(
-            user_id="u1",
             method="memory.propose",
             payload={"topic": "hydration"},
             idempotency_key="key-replay-1",
@@ -40,7 +39,6 @@ class OutboxConcurrencyExtendedTests(unittest.TestCase):
         self.assertEqual(len(self.provider.calls), 1)
 
         res2 = self.service.propose_memory_candidate(
-            user_id="u1",
             method="memory.propose",
             payload={"topic": "hydration"},
             idempotency_key="key-replay-1",
@@ -58,29 +56,29 @@ class OutboxConcurrencyExtendedTests(unittest.TestCase):
                 conn.execute(
                     """INSERT INTO memory_outbox(
                         intent_id, user_id, idempotency_key, method, payload_json, status, attempts, created_at
-                    ) VALUES (?, 'u_bulk', ?, 'memory.bulk', '{"idx": 1}', 'pending', 0, ?)""",
+                    ) VALUES (?, 'owner', ?, 'memory.bulk', '{"idx": 1}', 'pending', 0, ?)""",
                     (intent_id, f"key_{i}", now),
                 )
 
         # First maintenance pass: claims and processes exactly 50
-        m1 = self.service.maintain_memory(user_id="u_bulk", idempotency_key="maint-bulk-1")
+        m1 = self.service.maintain_memory(idempotency_key="maint-bulk-1")
         self.assertEqual(m1["data"]["outbox_processed"], 50)
         self.assertEqual(m1["data"]["sent_count"], 50)
 
         with self.service.store.connect() as conn:
             remaining = conn.execute(
-                "SELECT COUNT(*) AS c FROM memory_outbox WHERE user_id = 'u_bulk' AND status = 'pending'"
+                "SELECT COUNT(*) AS c FROM memory_outbox WHERE user_id = 'owner' AND status = 'pending'"
             ).fetchone()["c"]
         self.assertEqual(remaining, 15)
 
         # Second maintenance pass: claims and processes remaining 15
-        m2 = self.service.maintain_memory(user_id="u_bulk", idempotency_key="maint-bulk-2")
+        m2 = self.service.maintain_memory(idempotency_key="maint-bulk-2")
         self.assertEqual(m2["data"]["outbox_processed"], 15)
         self.assertEqual(m2["data"]["sent_count"], 15)
 
         with self.service.store.connect() as conn:
             final_pending = conn.execute(
-                "SELECT COUNT(*) AS c FROM memory_outbox WHERE user_id = 'u_bulk' AND status = 'pending'"
+                "SELECT COUNT(*) AS c FROM memory_outbox WHERE user_id = 'owner' AND status = 'pending'"
             ).fetchone()["c"]
         self.assertEqual(final_pending, 0)
 
@@ -92,12 +90,12 @@ class OutboxConcurrencyExtendedTests(unittest.TestCase):
                 """INSERT INTO memory_outbox(
                     intent_id, user_id, idempotency_key, method, payload_json, status,
                     owner_token, lease_until, attempts, created_at
-                ) VALUES ('intent_crashed_01', 'u_crash', 'k_crash', 'memory.propose',
+                ) VALUES ('intent_crashed_01', 'owner', 'k_crash', 'memory.propose',
                           '{"data": "orphan"}', 'in_flight', 'crashed_token_999', ?, 1, ?)""",
                 (expired_time, expired_time),
             )
 
-        m = self.service.maintain_memory(user_id="u_crash", idempotency_key="maint-crash-1")
+        m = self.service.maintain_memory(idempotency_key="maint-crash-1")
         self.assertEqual(m["data"]["sent_count"], 1)
 
         with self.service.store.connect() as conn:
@@ -118,32 +116,32 @@ class OutboxConcurrencyExtendedTests(unittest.TestCase):
             conn.execute(
                 """INSERT INTO domain_record(
                     record_id, user_id, kind, day, body_json, status, causation_id, state_version, created_at
-                ) VALUES ('rec_old_superseded', 'u_ttl', 'meal', '2026-07-20', '{}', 'superseded', 'cause_1', 1, ?)""",
+                ) VALUES ('rec_old_superseded', 'owner', 'meal', '2026-07-20', '{}', 'superseded', 'cause_1', 1, ?)""",
                 (old_time,),
             )
             # Recent superseded record (should NOT be deleted)
             conn.execute(
                 """INSERT INTO domain_record(
                     record_id, user_id, kind, day, body_json, status, causation_id, state_version, created_at
-                ) VALUES ('rec_recent_superseded', 'u_ttl', 'meal', '2026-08-30', '{}', 'superseded', 'cause_2', 2, ?)""",
+                ) VALUES ('rec_recent_superseded', 'owner', 'meal', '2026-08-30', '{}', 'superseded', 'cause_2', 2, ?)""",
                 (recent_time,),
             )
             # Old active record (should NEVER be deleted)
             conn.execute(
                 """INSERT INTO domain_record(
                     record_id, user_id, kind, day, body_json, status, causation_id, state_version, created_at
-                ) VALUES ('rec_old_active', 'u_ttl', 'meal', '2026-07-20', '{}', 'active', 'cause_3', 3, ?)""",
+                ) VALUES ('rec_old_active', 'owner', 'meal', '2026-07-20', '{}', 'active', 'cause_3', 3, ?)""",
                 (old_time,),
             )
             # Old sent outbox item (should be deleted)
             conn.execute(
                 """INSERT INTO memory_outbox(
                     intent_id, user_id, idempotency_key, method, payload_json, status, attempts, created_at
-                ) VALUES ('intent_old_sent', 'u_ttl', 'k_old', 'memory.propose', '{}', 'sent', 1, ?)""",
+                ) VALUES ('intent_old_sent', 'owner', 'k_old', 'memory.propose', '{}', 'sent', 1, ?)""",
                 (old_time,),
             )
 
-        m = self.service.maintain_memory(user_id="u_ttl", prune_days=30, idempotency_key="maint-ttl-1")
+        m = self.service.maintain_memory(prune_days=30, idempotency_key="maint-ttl-1")
         self.assertGreaterEqual(m["data"]["purged_superseded_count"], 1)
         self.assertGreaterEqual(m["data"]["purged_outbox_count"], 1)
         self.assertTrue(m["data"]["audit_chain_preserved"])

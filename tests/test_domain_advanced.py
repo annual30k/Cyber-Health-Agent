@@ -47,7 +47,6 @@ class TestDomainAdvanced(unittest.TestCase):
         """Deleting a meal soft-deletes and recalculates totals; repeating a meal copies foods and nutrients."""
         # 1. Log breakfast
         bk = self.service.log_meal(
-            user_id="u_user1",
             occurred_at="2026-09-04T08:00:00+08:00",
             meal_type="breakfast",
             foods=[{"name": "eggs", "amount_g": {"low": 100, "high": 120}}],
@@ -61,7 +60,6 @@ class TestDomainAdvanced(unittest.TestCase):
 
         # 2. Log lunch
         lunch = self.service.log_meal(
-            user_id="u_user1",
             occurred_at="2026-09-04T12:00:00+08:00",
             meal_type="lunch",
             foods=[{"name": "salad"}],
@@ -72,13 +70,12 @@ class TestDomainAdvanced(unittest.TestCase):
             idempotency_key="u1-lunch-1",
         )
 
-        today_before_del = self.service.get_today("u_user1", "2026-09-04")
+        today_before_del = self.service.get_today("2026-09-04")
         self.assertEqual(today_before_del["nutrition"]["meal_count"], 2)
         self.assertEqual(today_before_del["nutrition"]["kcal_low"], 450)
 
         # 3. Delete lunch (mistake entry)
         del_res = self.service.delete_meal(
-            user_id="u_user1",
             meal_id=lunch["data"]["meal_id"],
             idempotency_key="u1-del-lunch",
             reason="Double logged by mistake",
@@ -86,13 +83,12 @@ class TestDomainAdvanced(unittest.TestCase):
         self.assertEqual(del_res["status"], "success")
         self.assertEqual(del_res["data"]["deleted_meal_id"], lunch["data"]["meal_id"])
 
-        today_after_del = self.service.get_today("u_user1", "2026-09-04")
+        today_after_del = self.service.get_today("2026-09-04")
         self.assertEqual(today_after_del["nutrition"]["meal_count"], 1)
         self.assertEqual(today_after_del["nutrition"]["kcal_low"], 150)
 
         # 4. Repeat breakfast on next day using repeat_meal="yesterday"
         self.service.log_meal(
-            user_id="u_user1",
             occurred_at="2026-09-05T08:00:00+08:00",
             meal_type="breakfast",
             foods=[],
@@ -101,7 +97,7 @@ class TestDomainAdvanced(unittest.TestCase):
             repeat_meal=meal1_id,
             idempotency_key="u1-bk-2",
         )
-        today_sept5 = self.service.get_today("u_user1", "2026-09-05")
+        today_sept5 = self.service.get_today("2026-09-05")
         self.assertEqual(today_sept5["nutrition"]["meal_count"], 1)
         self.assertEqual(today_sept5["nutrition"]["kcal_low"], 150)
         self.assertEqual(today_sept5["nutrition"]["protein_low"], 12)
@@ -109,7 +105,6 @@ class TestDomainAdvanced(unittest.TestCase):
     def test_daily_metrics_and_recovery_score(self) -> None:
         """Sleep < 6 or fatigue >= 7 triggers TRAIN_RECOVERY_01 and lowers recovery score."""
         res = self.service.log_daily_metrics(
-            user_id="u_user2",
             date="2026-09-04",
             metrics={
                 "weight_kg": 72.5,
@@ -131,7 +126,6 @@ class TestDomainAdvanced(unittest.TestCase):
         """Red flag symptom triggers Restricted Mode; clearing it requires clearance_reason and initiates 7-day Deload."""
         # 1. Log metrics reporting severe chest pain (red flag)
         res_flag = self.service.log_daily_metrics(
-            user_id="u_user3",
             date="2026-09-04",
             metrics={
                 "soreness_locations": ["严重胸痛", "呼吸困难"],
@@ -140,14 +134,13 @@ class TestDomainAdvanced(unittest.TestCase):
         )
         self.assertIn("TRAIN_SAFETY_01", res_flag["data"]["triggered_rules"])
 
-        prof = self.service.get_profile("u_user3")
+        prof = self.service.get_profile()
         self.assertEqual(prof["safety_mode"], "restricted")
         self.assertIn("严重胸痛", prof["safety_flags"])
 
         # 2. Attempting to log a workout in restricted mode must raise SafetyRestrictedError
         with self.assertRaises(SafetyRestrictedError) as caught:
             self.service.log_workout(
-                user_id="u_user3",
                 date="2026-09-04",
                 planned_exercises=["Bench Press"],
                 idempotency_key="u3-wo-fail",
@@ -157,7 +150,6 @@ class TestDomainAdvanced(unittest.TestCase):
         # 3. Attempting to clear safety flags without clearance reason must fail
         with self.assertRaises(ValidationError):
             self.service.update_profile(
-                user_id="u_user3",
                 clear_safety_flags=True,
                 clearance_reason="",
                 idempotency_key="u3-clear-bad",
@@ -165,7 +157,6 @@ class TestDomainAdvanced(unittest.TestCase):
 
         # 4. Clear safety flags with valid clearance reason
         clear_res = self.service.update_profile(
-            user_id="u_user3",
             clear_safety_flags=True,
             clearance_reason="Cardiac check complete, symptoms cleared, doctor signed return-to-play",
             idempotency_key="u3-clear-rf",
@@ -177,7 +168,6 @@ class TestDomainAdvanced(unittest.TestCase):
 
         # 5. Now workout logging succeeds, but issues deload warning
         wo_res = self.service.log_workout(
-            user_id="u_user3",
             date="2026-09-04",
             planned_exercises=["Goblet Squat"],
             actual_sets=[{"exercise": "Goblet Squat", "weight_kg": 12, "reps": 10, "rir": 4}],
@@ -190,7 +180,6 @@ class TestDomainAdvanced(unittest.TestCase):
         """Daily review distinguishes no_data from zero intake, and plan_tomorrow handles commit."""
         # Unrecorded day review
         rev_empty = self.service.daily_review(
-            user_id="u_user4",
             date="2026-09-04",
             idempotency_key="u4-rev-1",
         )
@@ -199,7 +188,6 @@ class TestDomainAdvanced(unittest.TestCase):
 
         # Commit tomorrow's plan
         plan_res = self.service.plan_tomorrow(
-            user_id="u_user4",
             date="2026-09-05",
             idempotency_key="u4-plan-commit",
             commit=True,
@@ -207,7 +195,7 @@ class TestDomainAdvanced(unittest.TestCase):
         self.assertEqual(plan_res["data"]["status"], "committed")
 
         # Verify today status on Sept 5 reflects committed plan state
-        today_sept5 = self.service.get_today("u_user4", "2026-09-05")
+        today_sept5 = self.service.get_today("2026-09-05")
         self.assertEqual(today_sept5["plan_status"]["state"], "committed")
 
     def test_schedule_lifecycle_and_overdue_compensation(self) -> None:
@@ -223,11 +211,11 @@ class TestDomainAdvanced(unittest.TestCase):
                     event_id, user_id, event_type, window_start, window_end, status,
                     revision, delivery_attempts, prompt_hint, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, 'pending', 1, 0, 'Late night review', ?, ?)""",
-                ("sched-001", "u_user5", "DAILY_REVIEW", past_start, past_end, past_start, past_start),
+                ("sched-001", "owner", "DAILY_REVIEW", past_start, past_end, past_start, past_start),
             )
 
         # Call get_schedule
-        events = self.service.get_schedule("u_user5", now=now)
+        events = self.service.get_schedule(now=now)
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["event_id"], "sched-001")
         self.assertEqual(events[0]["status"], "overdue")
@@ -235,7 +223,6 @@ class TestDomainAdvanced(unittest.TestCase):
 
         # Acknowledge the overdue event
         ack = self.service.acknowledge_schedule_event(
-            user_id="u_user5",
             event_id="sched-001",
             action="acknowledged",
             idempotency_key="ack-sched-001",
@@ -243,14 +230,13 @@ class TestDomainAdvanced(unittest.TestCase):
         self.assertEqual(ack["status"], "success")
 
         # Subsequent get_schedule should return no pending/overdue events
-        events_after = self.service.get_schedule("u_user5", now=now)
+        events_after = self.service.get_schedule(now=now)
         self.assertEqual(len(events_after), 0)
 
     def test_memory_outbox_queueing_and_maintain_retry(self) -> None:
         """When MemoryProvider is unavailable, candidate is stored in outbox; maintain_memory retries it."""
         # 1. Propose memory with default UnavailableMemoryProvider
         res = self.service.propose_memory_candidate(
-            user_id="u_user6",
             method="memory.propose",
             payload={"insight": "Lactose sensitivity observed"},
             idempotency_key="u6-prop-1",
@@ -261,19 +247,19 @@ class TestDomainAdvanced(unittest.TestCase):
         # Check outbox count
         with self.service.store.connect() as conn:
             pending_count = conn.execute(
-                "SELECT COUNT(*) AS c FROM memory_outbox WHERE user_id = 'u_user6' AND status = 'pending'"
+                "SELECT COUNT(*) AS c FROM memory_outbox WHERE user_id = 'owner' AND status = 'pending'"
             ).fetchone()["c"]
             self.assertEqual(pending_count, 1)
 
         # 2. Maintain memory while still unavailable -> stays in outbox
-        m1 = self.service.maintain_memory(user_id="u_user6", idempotency_key="u6-maint-1")
+        m1 = self.service.maintain_memory(idempotency_key="u6-maint-1")
         self.assertEqual(m1["status"], "partial")
         self.assertEqual(m1["data"]["deferred_count"], 1)
 
         # 3. Attach working mock MemoryProvider
         mock_provider = MockWorkingMemoryProvider()
         service_with_memory = CyberHealthService(self.db_path, memory_provider=mock_provider)
-        m2 = service_with_memory.maintain_memory(user_id="u_user6", idempotency_key="u6-maint-2")
+        m2 = service_with_memory.maintain_memory(idempotency_key="u6-maint-2")
         self.assertEqual(m2["status"], "success")
         self.assertEqual(m2["data"]["sent_count"], 1)
         self.assertEqual(len(mock_provider.calls), 1)
@@ -281,18 +267,16 @@ class TestDomainAdvanced(unittest.TestCase):
         # Check outbox is now empty of pending items
         with self.service.store.connect() as conn:
             pending_count_after = conn.execute(
-                "SELECT COUNT(*) AS c FROM memory_outbox WHERE user_id = 'u_user6' AND status = 'pending'"
+                "SELECT COUNT(*) AS c FROM memory_outbox WHERE user_id = 'owner' AND status = 'pending'"
             ).fetchone()["c"]
             self.assertEqual(pending_count_after, 0)
 
     def test_uncertainty_aggregation_without_fake_confidence_intervals(self) -> None:
         """Aggregate estimate ranges transparently without inventing a confidence level."""
-        user_id = "u_stats_user"
         date = "2026-09-08"
 
         # 1. Configure profile targets
         self.service.update_profile(
-            user_id=user_id,
             idempotency_key="u_stats_prof",
             goals={
                 "target_kcal_low": 2100,
@@ -312,7 +296,6 @@ class TestDomainAdvanced(unittest.TestCase):
         ]
         for idx, (mtype, k_low, k_high, p_low, p_high) in enumerate(meals):
             self.service.log_meal(
-                user_id=user_id,
                 occurred_at=f"{date}T{8 + idx * 3:02d}:00:00+08:00",
                 meal_type=mtype,
                 foods=[{"name": f"Item {idx}"}],
@@ -325,7 +308,6 @@ class TestDomainAdvanced(unittest.TestCase):
 
         # 3. Daily review
         review = self.service.daily_review(
-            user_id=user_id,
             date=date,
             idempotency_key="u_stats_review",
         )
@@ -370,7 +352,7 @@ class TestDomainAdvanced(unittest.TestCase):
         self.assertIsNone(analysis["protein_gap_ci90"])
 
         # Check get_today remaining clamping consistency
-        today = self.service.get_today(user_id=user_id, day=date)
+        today = self.service.get_today(day=date)
         rem = today["remaining"]
         self.assertGreaterEqual(rem["kcal_mid"], rem["kcal_low"])
         self.assertLessEqual(rem["kcal_mid"], rem["kcal_high"])
@@ -386,10 +368,8 @@ class TestDomainAdvanced(unittest.TestCase):
 
     def test_single_meal_interval_consistency(self) -> None:
         """A single meal keeps its estimate bounds and emits no unsupported CI."""
-        user_id = "u_single_meal"
         date = "2026-09-08"
         self.service.update_profile(
-            user_id=user_id,
             idempotency_key="u_single_prof",
             goals={
                 "target_kcal_low": 2000,
@@ -399,7 +379,6 @@ class TestDomainAdvanced(unittest.TestCase):
             },
         )
         self.service.log_meal(
-            user_id=user_id,
             occurred_at=f"{date}T12:00:00+08:00",
             meal_type="lunch",
             foods=[{"name": "Chicken rice"}],
@@ -410,7 +389,6 @@ class TestDomainAdvanced(unittest.TestCase):
             idempotency_key="u_single_meal_1",
         )
         review = self.service.daily_review(
-            user_id=user_id,
             date=date,
             idempotency_key="u_single_review",
         )
@@ -435,10 +413,8 @@ class TestDomainAdvanced(unittest.TestCase):
 
     def test_statistical_single_meal_vs_multi_meal_mathematical_properties(self) -> None:
         """Verify heuristic aggregation and the separation of policy gaps from uncertainty."""
-        user_id = "u_math_test"
         date = "2026-09-08"
         self.service.update_profile(
-            user_id=user_id,
             idempotency_key="u_math_prof",
             goals={
                 "target_kcal_low": 2000,
@@ -450,7 +426,6 @@ class TestDomainAdvanced(unittest.TestCase):
 
         # 1. Log First Meal (n=1)
         self.service.log_meal(
-            user_id=user_id,
             occurred_at=f"{date}T08:00:00+08:00",
             meal_type="breakfast",
             foods=[{"name": "Oatmeal and eggs"}],
@@ -461,7 +436,6 @@ class TestDomainAdvanced(unittest.TestCase):
             idempotency_key="u_math_meal_1",
         )
         review1 = self.service.daily_review(
-            user_id=user_id,
             date=date,
             idempotency_key="u_math_rev_1",
         )
@@ -478,7 +452,6 @@ class TestDomainAdvanced(unittest.TestCase):
 
         # 2. Log Second Meal (n=2) -> CLT applies
         self.service.log_meal(
-            user_id=user_id,
             occurred_at=f"{date}T12:30:00+08:00",
             meal_type="lunch",
             foods=[{"name": "Salmon and sweet potato"}],
@@ -489,7 +462,6 @@ class TestDomainAdvanced(unittest.TestCase):
             idempotency_key="u_math_meal_2",
         )
         review2 = self.service.daily_review(
-            user_id=user_id,
             date=date,
             idempotency_key="u_math_rev_2",
         )
@@ -528,10 +500,8 @@ class TestDomainAdvanced(unittest.TestCase):
 
     def test_zero_variance_exact_meal_bounds(self) -> None:
         """When user logs exact values (low == high), variance is zero, mid equals value, and bounds match."""
-        user_id = "u_exact_meal"
         date = "2026-09-08"
         self.service.update_profile(
-            user_id=user_id,
             idempotency_key="u_exact_prof",
             goals={
                 "target_kcal_low": 2000,
@@ -541,7 +511,6 @@ class TestDomainAdvanced(unittest.TestCase):
             },
         )
         self.service.log_meal(
-            user_id=user_id,
             occurred_at=f"{date}T12:00:00+08:00",
             meal_type="lunch",
             foods=[{"name": "Measured meal"}],
@@ -552,7 +521,6 @@ class TestDomainAdvanced(unittest.TestCase):
             idempotency_key="u_exact_meal_1",
         )
         review = self.service.daily_review(
-            user_id=user_id,
             date=date,
             idempotency_key="u_exact_rev",
         )

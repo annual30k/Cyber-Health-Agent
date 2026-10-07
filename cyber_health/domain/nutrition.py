@@ -10,7 +10,7 @@ from typing import Any
 
 from ..errors import ConflictError, ValidationError
 from ..models import DeleteMealInput, GetRemainingCaloriesInput, LogMealInput
-from .base import ServiceCore
+from .base import OWNER_ID, ServiceCore
 
 
 class NutritionMixin(ServiceCore):
@@ -41,7 +41,7 @@ class NutritionMixin(ServiceCore):
         }
 
     def _today_totals(
-        self, conn: Any, user_id: str, day: str, tz_name: str, include_statistical: bool = False
+        self, conn: Any, day: str, tz_name: str, include_statistical: bool = False
     ) -> dict[str, Any]:
         try:
             day_dt = datetime.strptime(day, "%Y-%m-%d")
@@ -51,14 +51,14 @@ class NutritionMixin(ServiceCore):
                 """SELECT meal_id, occurred_at, kcal_low, kcal_high, protein_low, protein_high
                    FROM meal_log
                    WHERE user_id = ? AND occurred_at >= ? AND occurred_at < ? AND status = 'active'""",
-                (user_id, w_start, w_end),
+                (OWNER_ID, w_start, w_end),
             ).fetchall()
         except ValueError:
             rows = conn.execute(
                 """SELECT meal_id, occurred_at, kcal_low, kcal_high, protein_low, protein_high
                    FROM meal_log
                    WHERE user_id = ? AND status = 'active'""",
-                (user_id,),
+                (OWNER_ID,),
             ).fetchall()
         matching = [
             r for r in rows
@@ -132,7 +132,7 @@ class NutritionMixin(ServiceCore):
         })
         return res
 
-    def get_today(self, user_id: str, day: str, now: datetime | None = None) -> dict[str, Any]:
+    def get_today(self, day: str, now: datetime | None = None) -> dict[str, Any]:
         try:
             datetime.strptime(day, "%Y-%m-%d")
         except Exception as err:
@@ -146,7 +146,7 @@ class NutritionMixin(ServiceCore):
                 row = conn.execute(
                     """SELECT timezone, goals_json, constraints_json, state_version, safety_mode, deload_until
                        FROM user_profile WHERE user_id = ?""",
-                    (user_id,),
+                    (OWNER_ID,),
                 ).fetchone()
                 tz_name = row["timezone"] if row else "Asia/Shanghai"
                 version = row["state_version"] if row else 0
@@ -154,7 +154,7 @@ class NutritionMixin(ServiceCore):
                 deload_until = row["deload_until"] if row else None
                 goals = json.loads(row["goals_json"]) if row else {}
 
-                totals = self._today_totals(conn, user_id, day, tz_name)
+                totals = self._today_totals(conn, day, tz_name)
 
                 # Real Targets & Remaining Calculation (No ungrounded default calorie or protein advice)
                 nutr_targets = self._resolve_nutrition_targets(goals)
@@ -210,14 +210,14 @@ class NutritionMixin(ServiceCore):
                     """SELECT body_json, status FROM domain_record
                        WHERE user_id = ? AND kind = 'plan' AND day = ? AND status NOT IN ('superseded', 'deleted')
                        ORDER BY created_at DESC LIMIT 1""",
-                    (user_id, day),
+                    (OWNER_ID, day),
                 ).fetchone()
                 plan_state = plan_row["status"] if plan_row else "draft"
                 is_missing = totals["meal_count"] == 0
-                review_readiness = self._daily_review_facts(conn, user_id, day, tz_name)
+                review_readiness = self._daily_review_facts(conn, day, tz_name)
 
                 # Unified pure-read maintenance due-work evaluation
-                due_info = self._calculate_maintenance_due(conn, user_id, now_dt, day=day)
+                due_info = self._calculate_maintenance_due(conn, now_dt, day=day)
                 maint_rec = due_info["due"]
                 maint_reason = due_info["reason"]
                 maint_key = due_info["maintenance_key"]
@@ -280,16 +280,15 @@ class NutritionMixin(ServiceCore):
     def get_remaining_calories(
         self,
         *,
-        user_id: str,
         date: str,
     ) -> dict[str, Any]:
         """Calculate remaining daily calorie/protein budget and coaching priority."""
         try:
-            GetRemainingCaloriesInput(user_id=user_id, date=date)
+            GetRemainingCaloriesInput(date=date)
         except Exception as err:
             raise ValidationError(str(err)) from err
 
-        today_info = self.get_today(user_id=user_id, day=date)
+        today_info = self.get_today(day=date)
         targets = today_info.get("targets", {})
         remaining = today_info.get("remaining", {})
         version = today_info.get("state_version", 0)
@@ -317,9 +316,9 @@ class NutritionMixin(ServiceCore):
                 priority_nutrients = ["calories"]
                 suggestion = f"Protein target met. Remaining energy budget: {rem_kcal_low}-{rem_kcal_high} kcal (point estimate: ~{rem_kcal_mid} kcal)."
 
-        operation_id = f"op_read_rem_{user_id}_{version}"
+        operation_id = f"op_read_rem_{OWNER_ID}_{version}"
         data = {
-            "user_id": user_id,
+            "user_id": OWNER_ID,
             "date": date,
             "remaining_ranges": remaining_ranges,
             "priority_nutrients": priority_nutrients,
@@ -338,7 +337,6 @@ class NutritionMixin(ServiceCore):
     def log_meal(
         self,
         *,
-        user_id: str,
         occurred_at: str,
         meal_type: str,
         foods: list[dict[str, Any]] | None = None,
@@ -358,7 +356,6 @@ class NutritionMixin(ServiceCore):
         foods_list = foods if foods is not None else []
         try:
             validated = LogMealInput(
-                user_id=user_id,
                 occurred_at=occurred_at,
                 meal_type=meal_type,
                 foods=foods_list,  # type: ignore[arg-type]
@@ -381,7 +378,7 @@ class NutritionMixin(ServiceCore):
         dumped_foods = [f.model_dump() for f in validated.foods]
         payload = {
             "action": "log_meal",
-            "user_id": user_id,
+            "user_id": OWNER_ID,
             "occurred_at": occurred_at,
             "meal_type": meal_type,
             "foods": dumped_foods,
@@ -400,14 +397,14 @@ class NutritionMixin(ServiceCore):
         now, operation_id = self._now(), f"op_{uuid.uuid4().hex}"
 
         with self.store.transaction() as conn:
-            existing = self._check_idempotency(conn, user_id, idempotency_key, "log_meal", payload)
+            existing = self._check_idempotency(conn, idempotency_key, "log_meal", payload)
             if existing:
                 return existing
 
-            self._ensure_profile_in_tx(conn, user_id, now)
+            self._ensure_profile_in_tx(conn, now)
             profile = conn.execute(
                 "SELECT timezone, state_version FROM user_profile WHERE user_id = ?",
-                (user_id,),
+                (OWNER_ID,),
             ).fetchone()
             before_version = profile["state_version"]
             tz_name = profile["timezone"]
@@ -436,7 +433,7 @@ class NutritionMixin(ServiceCore):
                            FROM meal_log
                            WHERE user_id = ? AND meal_type = ? AND status = 'active'
                            ORDER BY occurred_at DESC""",
-                        (user_id, target_sub),
+                        (OWNER_ID, target_sub),
                     ).fetchall()
                     for cand in candidates:
                         if self._parse_day_in_timezone(cand["occurred_at"], tz_name) == yesterday_date:
@@ -449,7 +446,7 @@ class NutritionMixin(ServiceCore):
                         """SELECT foods_json, kcal_low, kcal_high, protein_low, protein_high
                            FROM meal_log
                            WHERE meal_id = ? AND user_id = ? AND status = 'active'""",
-                        (repeat_meal, user_id),
+                        (repeat_meal, OWNER_ID),
                     ).fetchone()
 
                 if not source_meal:
@@ -465,7 +462,7 @@ class NutritionMixin(ServiceCore):
             if target_meal_id:
                 original = conn.execute(
                     "SELECT meal_id, status FROM meal_log WHERE meal_id = ? AND user_id = ?",
-                    (target_meal_id, user_id),
+                    (target_meal_id, OWNER_ID),
                 ).fetchone()
                 if not original or original["status"] != "active":
                     raise ValidationError("Target meal does not exist or is no longer active")
@@ -477,7 +474,7 @@ class NutritionMixin(ServiceCore):
             after_version = before_version + 1
             conn.execute(
                 "UPDATE user_profile SET state_version = ?, updated_at = ? WHERE user_id = ?",
-                (after_version, now, user_id),
+                (after_version, now, OWNER_ID),
             )
 
             meal_id = f"meal_{uuid.uuid4().hex}"
@@ -488,7 +485,7 @@ class NutritionMixin(ServiceCore):
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)""",
                 (
                     meal_id,
-                    user_id,
+                    OWNER_ID,
                     occurred_at,
                     meal_type,
                     self.store.json(final_foods),
@@ -504,7 +501,7 @@ class NutritionMixin(ServiceCore):
             )
 
             day = self._parse_day_in_timezone(occurred_at, tz_name)
-            totals = self._today_totals(conn, user_id, day, tz_name)
+            totals = self._today_totals(conn, day, tz_name)
             response = self._response(
                 operation_id,
                 "success",
@@ -514,7 +511,6 @@ class NutritionMixin(ServiceCore):
             self._record_operation(
                 conn,
                 operation_id=operation_id,
-                user_id=user_id,
                 idempotency_key=idempotency_key,
                 payload=payload,
                 action="log_meal",
@@ -527,7 +523,6 @@ class NutritionMixin(ServiceCore):
     def delete_meal(
         self,
         *,
-        user_id: str,
         meal_id: str,
         idempotency_key: str,
         reason: str | None = None,
@@ -535,7 +530,6 @@ class NutritionMixin(ServiceCore):
     ) -> dict[str, Any]:
         try:
             DeleteMealInput(
-                user_id=user_id,
                 meal_id=meal_id,
                 idempotency_key=idempotency_key,
                 reason=reason,
@@ -546,7 +540,7 @@ class NutritionMixin(ServiceCore):
 
         payload = {
             "action": "delete_meal",
-            "user_id": user_id,
+            "user_id": OWNER_ID,
             "meal_id": meal_id,
             "reason": reason,
             "expected_state_version": expected_state_version,
@@ -554,14 +548,14 @@ class NutritionMixin(ServiceCore):
         now, operation_id = self._now(), f"op_{uuid.uuid4().hex}"
 
         with self.store.transaction() as conn:
-            existing = self._check_idempotency(conn, user_id, idempotency_key, "delete_meal", payload)
+            existing = self._check_idempotency(conn, idempotency_key, "delete_meal", payload)
             if existing:
                 return existing
 
-            self._ensure_profile_in_tx(conn, user_id, now)
+            self._ensure_profile_in_tx(conn, now)
             profile = conn.execute(
                 "SELECT timezone, state_version FROM user_profile WHERE user_id = ?",
-                (user_id,),
+                (OWNER_ID,),
             ).fetchone()
             before_version = profile["state_version"]
             tz_name = profile["timezone"]
@@ -573,7 +567,7 @@ class NutritionMixin(ServiceCore):
 
             target = conn.execute(
                 "SELECT occurred_at, status FROM meal_log WHERE meal_id = ? AND user_id = ?",
-                (meal_id, user_id),
+                (meal_id, OWNER_ID),
             ).fetchone()
             if not target or target["status"] != "active":
                 raise ValidationError(f"Meal {meal_id} does not exist or is already superseded/deleted")
@@ -586,11 +580,11 @@ class NutritionMixin(ServiceCore):
             after_version = before_version + 1
             conn.execute(
                 "UPDATE user_profile SET state_version = ?, updated_at = ? WHERE user_id = ?",
-                (after_version, now, user_id),
+                (after_version, now, OWNER_ID),
             )
 
             day = self._parse_day_in_timezone(target["occurred_at"], tz_name)
-            totals = self._today_totals(conn, user_id, day, tz_name)
+            totals = self._today_totals(conn, day, tz_name)
 
             response = self._response(
                 operation_id,
@@ -601,7 +595,6 @@ class NutritionMixin(ServiceCore):
             self._record_operation(
                 conn,
                 operation_id=operation_id,
-                user_id=user_id,
                 idempotency_key=idempotency_key,
                 payload=payload,
                 action="delete_meal",

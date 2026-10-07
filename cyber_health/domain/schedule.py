@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from ..errors import ValidationError
 from ..models import AcknowledgeScheduleInput, ScheduleDailyRemindersInput
-from .base import _INVALID_ZONE_ERRORS, _MALFORMED_RECORD_ERRORS, ServiceCore
+from .base import _INVALID_ZONE_ERRORS, _MALFORMED_RECORD_ERRORS, OWNER_ID, ServiceCore
 
 
 class ScheduleMixin(ServiceCore):
@@ -18,7 +18,6 @@ class ScheduleMixin(ServiceCore):
 
     def get_schedule(
         self,
-        user_id: str,
         date: str | None = None,
         now: datetime | None = None,
         include_inactive: bool = False,
@@ -34,7 +33,7 @@ class ScheduleMixin(ServiceCore):
                 profile_row = conn.execute(
                     """SELECT timezone, goals_json, constraints_json, safety_mode, state_version
                        FROM user_profile WHERE user_id = ?""",
-                    (user_id,),
+                    (OWNER_ID,),
                 ).fetchone()
                 tz_name = profile_row["timezone"] if profile_row else "Asia/Shanghai"
                 try:
@@ -61,7 +60,7 @@ class ScheduleMixin(ServiceCore):
                            FROM schedule_event
                            WHERE user_id = ?
                            ORDER BY window_start ASC""",
-                        (user_id,),
+                        (OWNER_ID,),
                     ).fetchall()
                 else:
                     all_rows = conn.execute(
@@ -70,7 +69,7 @@ class ScheduleMixin(ServiceCore):
                            FROM schedule_event
                            WHERE user_id = ? AND status IN ('pending', 'overdue')
                            ORDER BY window_start ASC""",
-                        (user_id,),
+                        (OWNER_ID,),
                     ).fetchall()
 
                 results: list[dict[str, Any]] = []
@@ -136,7 +135,7 @@ class ScheduleMixin(ServiceCore):
                                 """SELECT status, body_json FROM domain_record
                                    WHERE user_id = ? AND kind = 'plan' AND day = ? AND status NOT IN ('superseded', 'deleted')
                                    ORDER BY created_at DESC LIMIT 1""",
-                                (user_id, item_day),
+                                (OWNER_ID, item_day),
                             ).fetchone()
                             if plan_row:
                                 p_status = plan_row["status"]
@@ -154,7 +153,7 @@ class ScheduleMixin(ServiceCore):
                             lunch_rows = conn.execute(
                                 """SELECT meal_id, occurred_at FROM meal_log
                                    WHERE user_id = ? AND meal_type = 'lunch' AND status = 'active'""",
-                                (user_id,),
+                                (OWNER_ID,),
                             ).fetchall()
                             lunch_logged = any(
                                 self._parse_day_in_timezone(lr["occurred_at"], tz_name) == item_day
@@ -168,7 +167,7 @@ class ScheduleMixin(ServiceCore):
                             dinner_rows = conn.execute(
                                 """SELECT meal_id, occurred_at FROM meal_log
                                    WHERE user_id = ? AND meal_type = 'dinner' AND status = 'active'""",
-                                (user_id,),
+                                (OWNER_ID,),
                             ).fetchall()
                             dinner_logged = any(
                                 self._parse_day_in_timezone(dr["occurred_at"], tz_name) == item_day
@@ -186,7 +185,7 @@ class ScheduleMixin(ServiceCore):
                                 wo_rows = conn.execute(
                                     """SELECT body_json FROM domain_record
                                        WHERE user_id = ? AND kind IN ('workout', 'workout_log') AND day = ? AND status = 'active'""",
-                                    (user_id, item_day),
+                                    (OWNER_ID, item_day),
                                 ).fetchall()
                                 completed = False
                                 for wr in wo_rows:
@@ -207,7 +206,7 @@ class ScheduleMixin(ServiceCore):
                                         """SELECT body_json FROM domain_record
                                            WHERE user_id = ? AND kind = 'plan' AND day = ? AND status NOT IN ('superseded', 'deleted')
                                            ORDER BY created_at DESC LIMIT 1""",
-                                        (user_id, item_day),
+                                        (OWNER_ID, item_day),
                                     ).fetchone()
                                     if plan_row:
                                         try:
@@ -227,7 +226,7 @@ class ScheduleMixin(ServiceCore):
                                 """SELECT record_id FROM domain_record
                                    WHERE user_id = ? AND kind = 'daily_review' AND day = ? AND status = 'active'
                                    LIMIT 1""",
-                                (user_id, item_day),
+                                (OWNER_ID, item_day),
                             ).fetchone()
                             if rev_row:
                                 eligible = False
@@ -247,26 +246,25 @@ class ScheduleMixin(ServiceCore):
     def schedule_daily_reminders(
         self,
         *,
-        user_id: str,
         date: str,
         idempotency_key: str,
     ) -> dict[str, Any]:
         """Generate deterministic standard schedule events for a specific day."""
         try:
-            ScheduleDailyRemindersInput(user_id=user_id, date=date, idempotency_key=idempotency_key)
+            ScheduleDailyRemindersInput(date=date, idempotency_key=idempotency_key)
         except Exception as err:
             raise ValidationError(str(err)) from err
 
-        payload = {"action": "schedule_daily_reminders", "user_id": user_id, "date": date}
+        payload = {"action": "schedule_daily_reminders", "user_id": OWNER_ID, "date": date}
         now, operation_id = self._now(), f"op_{uuid.uuid4().hex}"
 
         with self.store.transaction() as conn:
-            existing = self._check_idempotency(conn, user_id, idempotency_key, "schedule_daily_reminders", payload)
+            existing = self._check_idempotency(conn, idempotency_key, "schedule_daily_reminders", payload)
             if existing:
                 return existing
 
-            self._ensure_profile_in_tx(conn, user_id, now)
-            row = conn.execute("SELECT timezone, state_version FROM user_profile WHERE user_id = ?", (user_id,)).fetchone()
+            self._ensure_profile_in_tx(conn, now)
+            row = conn.execute("SELECT timezone, state_version FROM user_profile WHERE user_id = ?", (OWNER_ID,)).fetchone()
             before_version = row["state_version"]
             tz_name = row["timezone"]
 
@@ -276,11 +274,11 @@ class ScheduleMixin(ServiceCore):
                 user_tz = ZoneInfo("Asia/Shanghai")
 
             standard_windows = [
-                ("MORNING_PLAN", "07:30:00", "08:30:00", "晨间唤醒：记录体重与昨晚睡眠，锁定今日执行计划", "morning_plan_not_locked", f"sched_{user_id}_{date}_morning_plan"),
-                ("MEAL_CHECK", "13:00:00", "14:00:00", "午餐核验：询问就餐与饥饿感，提示水分补充", "lunch_not_logged", f"sched_{user_id}_{date}_meal_check_lunch"),
-                ("WORKOUT_REMINDER", "17:30:00", "18:30:00", "训练窗口临近：推送最低可完成版本或热身提示", "workout_pending", f"sched_{user_id}_{date}_workout_reminder"),
-                ("MEAL_CHECK", "19:30:00", "20:30:00", "晚餐核验：询问就餐与饥饿感，提示摄入控制", "dinner_not_logged", f"sched_{user_id}_{date}_meal_check_dinner"),
-                ("DAILY_REVIEW", "21:30:00", "22:30:00", "晚间对账：复盘全天摄入与运动，生成次日预案", "review_pending", f"sched_{user_id}_{date}_daily_review"),
+                ("MORNING_PLAN", "07:30:00", "08:30:00", "晨间唤醒：记录体重与昨晚睡眠，锁定今日执行计划", "morning_plan_not_locked", f"sched_{OWNER_ID}_{date}_morning_plan"),
+                ("MEAL_CHECK", "13:00:00", "14:00:00", "午餐核验：询问就餐与饥饿感，提示水分补充", "lunch_not_logged", f"sched_{OWNER_ID}_{date}_meal_check_lunch"),
+                ("WORKOUT_REMINDER", "17:30:00", "18:30:00", "训练窗口临近：推送最低可完成版本或热身提示", "workout_pending", f"sched_{OWNER_ID}_{date}_workout_reminder"),
+                ("MEAL_CHECK", "19:30:00", "20:30:00", "晚餐核验：询问就餐与饥饿感，提示摄入控制", "dinner_not_logged", f"sched_{OWNER_ID}_{date}_meal_check_dinner"),
+                ("DAILY_REVIEW", "21:30:00", "22:30:00", "晚间对账：复盘全天摄入与运动，生成次日预案", "review_pending", f"sched_{OWNER_ID}_{date}_daily_review"),
             ]
 
             y, mo, d = map(int, date.split("-"))
@@ -330,7 +328,7 @@ class ScheduleMixin(ServiceCore):
                             event_id, user_id, event_type, window_start, window_end, status,
                             revision, delivery_attempts, prompt_hint, created_at, updated_at
                         ) VALUES (?, ?, ?, ?, ?, 'pending', 1, 0, ?, ?, ?)""",
-                        (ev_id, user_id, ev_type, w_start, w_end, hint, now, now),
+                        (ev_id, OWNER_ID, ev_type, w_start, w_end, hint, now, now),
                     )
 
                 created_events.append({
@@ -346,7 +344,7 @@ class ScheduleMixin(ServiceCore):
             after_version = before_version + 1
             conn.execute(
                 "UPDATE user_profile SET state_version = ?, updated_at = ? WHERE user_id = ?",
-                (after_version, now, user_id),
+                (after_version, now, OWNER_ID),
             )
 
             data = {"date": date, "scheduled_events": created_events}
@@ -359,7 +357,6 @@ class ScheduleMixin(ServiceCore):
             self._record_operation(
                 conn,
                 operation_id=operation_id,
-                user_id=user_id,
                 idempotency_key=idempotency_key,
                 payload=payload,
                 action="schedule_daily_reminders",
@@ -372,7 +369,6 @@ class ScheduleMixin(ServiceCore):
     def update_schedule_event(
         self,
         *,
-        user_id: str,
         event_id: str,
         action: str = "acknowledged",
         idempotency_key: str,
@@ -382,7 +378,6 @@ class ScheduleMixin(ServiceCore):
     ) -> dict[str, Any]:
         try:
             AcknowledgeScheduleInput(
-                user_id=user_id,
                 event_id=event_id,
                 action=action,  # type: ignore[arg-type]
                 idempotency_key=idempotency_key,
@@ -395,7 +390,7 @@ class ScheduleMixin(ServiceCore):
 
         payload = {
             "action": "update_schedule_event",
-            "user_id": user_id,
+            "user_id": OWNER_ID,
             "event_id": event_id,
             "event_action": action,
             "new_window_start": new_window_start,
@@ -405,20 +400,20 @@ class ScheduleMixin(ServiceCore):
         now, operation_id = self._now(), f"op_{uuid.uuid4().hex}"
 
         with self.store.transaction() as conn:
-            existing = self._check_idempotency(conn, user_id, idempotency_key, "update_schedule_event", payload)
+            existing = self._check_idempotency(conn, idempotency_key, "update_schedule_event", payload)
             if existing:
                 return existing
 
-            self._ensure_profile_in_tx(conn, user_id, now)
-            profile = conn.execute("SELECT state_version FROM user_profile WHERE user_id = ?", (user_id,)).fetchone()
+            self._ensure_profile_in_tx(conn, now)
+            profile = conn.execute("SELECT state_version FROM user_profile WHERE user_id = ?", (OWNER_ID,)).fetchone()
             before_version = profile["state_version"]
 
             target = conn.execute(
                 "SELECT event_type, window_start, window_end, status, revision, delivery_attempts FROM schedule_event WHERE event_id = ? AND user_id = ?",
-                (event_id, user_id),
+                (event_id, OWNER_ID),
             ).fetchone()
             if not target:
-                raise ValidationError(f"Schedule event '{event_id}' not found for user '{user_id}'")
+                raise ValidationError(f"Schedule event '{event_id}' not found for user '{OWNER_ID}'")
 
             current_status = target["status"]
             revision = target["revision"]
@@ -477,7 +472,7 @@ class ScheduleMixin(ServiceCore):
             after_version = before_version + 1
             conn.execute(
                 "UPDATE user_profile SET state_version = ?, updated_at = ? WHERE user_id = ?",
-                (after_version, now, user_id),
+                (after_version, now, OWNER_ID),
             )
 
             data = {
@@ -496,7 +491,6 @@ class ScheduleMixin(ServiceCore):
             self._record_operation(
                 conn,
                 operation_id=operation_id,
-                user_id=user_id,
                 idempotency_key=idempotency_key,
                 payload=payload,
                 action="update_schedule_event",
@@ -509,13 +503,11 @@ class ScheduleMixin(ServiceCore):
     def acknowledge_schedule_event(
         self,
         *,
-        user_id: str,
         event_id: str,
         action: str = "acknowledged",
         idempotency_key: str,
     ) -> dict[str, Any]:
         return self.update_schedule_event(
-            user_id=user_id,
             event_id=event_id,
             action=action,
             idempotency_key=idempotency_key,

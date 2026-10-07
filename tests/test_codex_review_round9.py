@@ -38,20 +38,17 @@ class TestCodexReviewRound9(unittest.TestCase):
         generates a pending progression suggestion citing both source record IDs,
         while keeping the currently prescribed load unmutated until confirmed.
         """
-        user_id = "u_prog_01"
         self.service.update_profile(
-            user_id=user_id,
             goals={"experience_level": "intermediate"},
             idempotency_key="prof-prog-01",
         )
 
         # Baseline plan: Barbell Back Squat (target reps: 6-8, target_reps_max: 8)
-        p0 = self.service.get_training_plan(user_id=user_id, date="2026-09-01", equipment=["barbell"])
+        p0 = self.service.get_training_plan(date="2026-09-01", equipment=["barbell"])
         self.assertEqual(len(p0["plan"]["progression_suggestions"]), 0)
 
         # Session 1: Completed Squat with 80kg x 8 reps, RPE 7.5
         res_s1 = self.service.complete_workout(
-            user_id=user_id,
             date="2026-09-01",
             idempotency_key="wo-squat-s1",
             completed_exercises=[{"name": "Barbell Back Squat", "weight_kg": 80.0, "reps": 8, "sets": 3}],
@@ -61,12 +58,11 @@ class TestCodexReviewRound9(unittest.TestCase):
         s1_id = res_s1["data"]["record_id"]
 
         # Only 1 session: Must NOT trigger progression
-        p1 = self.service.get_training_plan(user_id=user_id, date="2026-09-02", equipment=["barbell"])
+        p1 = self.service.get_training_plan(date="2026-09-02", equipment=["barbell"])
         self.assertEqual(len(p1["plan"]["progression_suggestions"]), 0)
 
         # Session 2: Completed Squat again with 80kg x 8 reps, RPE 8.0
         res_s2 = self.service.complete_workout(
-            user_id=user_id,
             date="2026-09-03",
             idempotency_key="wo-squat-s2",
             completed_exercises=[{"name": "Barbell Back Squat", "weight_kg": 80.0, "reps": 8, "sets": 3}],
@@ -76,7 +72,7 @@ class TestCodexReviewRound9(unittest.TestCase):
         s2_id = res_s2["data"]["record_id"]
 
         # Now 2 consecutive sessions met criteria!
-        p2 = self.service.get_training_plan(user_id=user_id, date="2026-09-04", equipment=["barbell"])
+        p2 = self.service.get_training_plan(date="2026-09-04", equipment=["barbell"])
         suggs = p2["plan"]["progression_suggestions"]
         self.assertEqual(len(suggs), 1)
 
@@ -105,12 +101,9 @@ class TestCodexReviewRound9(unittest.TestCase):
         - non-target exercise
         - cross-user isolation
         """
-        u_main = "u_guards_main"
-        u_other = "u_guards_other"
 
         # 1. Incomplete session (< 1.0) does not qualify
         self.service.complete_workout(
-            user_id=u_main,
             date="2026-09-01",
             idempotency_key="wo-incomp-01",
             completed_exercises=[{"name": "Barbell Back Squat", "weight_kg": 90.0, "reps": 8}],
@@ -118,20 +111,17 @@ class TestCodexReviewRound9(unittest.TestCase):
             completion_rate=0.5,  # Incomplete!
         )
         self.service.complete_workout(
-            user_id=u_main,
             date="2026-09-02",
             idempotency_key="wo-incomp-02",
             completed_exercises=[{"name": "Barbell Back Squat", "weight_kg": 90.0, "reps": 8}],
             session_rpe=7.0,
             completion_rate=1.0,
         )
-        p_inc = self.service.get_training_plan(user_id=u_main, date="2026-09-03", equipment=["barbell"])
+        p_inc = self.service.get_training_plan(date="2026-09-03", equipment=["barbell"])
         self.assertEqual(len(p_inc["plan"]["progression_suggestions"]), 0)
 
         # 2. Missing RPE does not qualify
-        u_norpe = "u_norpe"
         self.service.complete_workout(
-            user_id=u_norpe,
             date="2026-09-01",
             idempotency_key="wo-norpe-01",
             completed_exercises=[{"name": "Barbell Back Squat", "weight_kg": 90.0, "reps": 8}],
@@ -139,20 +129,17 @@ class TestCodexReviewRound9(unittest.TestCase):
             completion_rate=1.0,
         )
         self.service.complete_workout(
-            user_id=u_norpe,
             date="2026-09-02",
             idempotency_key="wo-norpe-02",
             completed_exercises=[{"name": "Barbell Back Squat", "weight_kg": 90.0, "reps": 8}],
             session_rpe=7.5,
             completion_rate=1.0,
         )
-        p_norpe = self.service.get_training_plan(user_id=u_norpe, date="2026-09-03", equipment=["barbell"])
+        p_norpe = self.service.get_training_plan(date="2026-09-03", equipment=["barbell"])
         self.assertEqual(len(p_norpe["plan"]["progression_suggestions"]), 0)
 
         # 3. High RPE (> 8.0) does not qualify
-        u_highrpe = "u_highrpe"
         self.service.complete_workout(
-            user_id=u_highrpe,
             date="2026-09-01",
             idempotency_key="wo-hrpe-01",
             completed_exercises=[{"name": "Barbell Back Squat", "weight_kg": 90.0, "reps": 8}],
@@ -160,20 +147,17 @@ class TestCodexReviewRound9(unittest.TestCase):
             completion_rate=1.0,
         )
         self.service.complete_workout(
-            user_id=u_highrpe,
             date="2026-09-02",
             idempotency_key="wo-hrpe-02",
             completed_exercises=[{"name": "Barbell Back Squat", "weight_kg": 90.0, "reps": 8}],
             session_rpe=9.0,  # Too high, near failure!
             completion_rate=1.0,
         )
-        p_hrpe = self.service.get_training_plan(user_id=u_highrpe, date="2026-09-03", equipment=["barbell"])
+        p_hrpe = self.service.get_training_plan(date="2026-09-03", equipment=["barbell"])
         self.assertEqual(len(p_hrpe["plan"]["progression_suggestions"]), 0)
 
         # 4. Short of target reps (6 < 8) does not qualify
-        u_short = "u_short"
         self.service.complete_workout(
-            user_id=u_short,
             date="2026-09-01",
             idempotency_key="wo-short-01",
             completed_exercises=[{"name": "Barbell Back Squat", "weight_kg": 90.0, "reps": 8}],
@@ -181,20 +165,17 @@ class TestCodexReviewRound9(unittest.TestCase):
             completion_rate=1.0,
         )
         self.service.complete_workout(
-            user_id=u_short,
             date="2026-09-02",
             idempotency_key="wo-short-02",
             completed_exercises=[{"name": "Barbell Back Squat", "weight_kg": 90.0, "reps": 6}],  # Short of 8 reps
             session_rpe=7.5,
             completion_rate=1.0,
         )
-        p_short = self.service.get_training_plan(user_id=u_short, date="2026-09-03", equipment=["barbell"])
+        p_short = self.service.get_training_plan(date="2026-09-03", equipment=["barbell"])
         self.assertEqual(len(p_short["plan"]["progression_suggestions"]), 0)
 
         # 5. Non-target exercise does not trigger Squat progression
-        u_nontarget = "u_nontarget"
         self.service.complete_workout(
-            user_id=u_nontarget,
             date="2026-09-01",
             idempotency_key="wo-nt-01",
             completed_exercises=[{"name": "Barbell Bench Press", "weight_kg": 70.0, "reps": 8}],
@@ -202,7 +183,6 @@ class TestCodexReviewRound9(unittest.TestCase):
             completion_rate=1.0,
         )
         self.service.complete_workout(
-            user_id=u_nontarget,
             date="2026-09-02",
             idempotency_key="wo-nt-02",
             completed_exercises=[{"name": "Barbell Bench Press", "weight_kg": 70.0, "reps": 8}],
@@ -210,20 +190,18 @@ class TestCodexReviewRound9(unittest.TestCase):
             completion_rate=1.0,
         )
         # Check that Barbell Back Squat does not get a progression suggestion from Bench Press workouts
-        p_nt = self.service.get_training_plan(user_id=u_nontarget, date="2026-09-03", equipment=["barbell"])
+        p_nt = self.service.get_training_plan(date="2026-09-03", equipment=["barbell"])
         squat_suggs = [s for s in p_nt["plan"]["progression_suggestions"] if s["exercise_name"] == "Barbell Back Squat"]
         self.assertEqual(len(squat_suggs), 0)
 
         # 6. Cross-user isolation: User B must NOT trigger from User A's workouts
-        p_other = self.service.get_training_plan(user_id=u_other, date="2026-09-03", equipment=["barbell"])
+        p_other = self.service.get_training_plan(date="2026-09-03", equipment=["barbell"])
         self.assertEqual(len(p_other["plan"]["progression_suggestions"]), 0)
 
     def test_priority_hierarchy_blocks_progression(self) -> None:
         """Verify safety priority: Red flag, Deload, and Fatigue all take precedence over progression."""
-        user_id = "u_priority_test"
         # Seed 2 successful workouts for progression
         self.service.complete_workout(
-            user_id=user_id,
             date="2026-09-01",
             idempotency_key="wo-prio-01",
             completed_exercises=[{"name": "Barbell Back Squat", "weight_kg": 100.0, "reps": 8}],
@@ -231,7 +209,6 @@ class TestCodexReviewRound9(unittest.TestCase):
             completion_rate=1.0,
         )
         self.service.complete_workout(
-            user_id=user_id,
             date="2026-09-02",
             idempotency_key="wo-prio-02",
             completed_exercises=[{"name": "Barbell Back Squat", "weight_kg": 100.0, "reps": 8}],
@@ -241,42 +218,37 @@ class TestCodexReviewRound9(unittest.TestCase):
 
         # Case A: Fatigue / Sleep deficit on date of prescription -> triggers TRAIN_RECOVERY_01, NO progression
         self.service.log_daily_metrics(
-            user_id=user_id,
             date="2026-09-03",
             metrics={"sleep_hours": 5.0, "fatigue_level": 8},
             idempotency_key="metric-prio-fatigue",
         )
-        p_fatigue = self.service.get_training_plan(user_id=user_id, date="2026-09-03", equipment=["barbell"])
+        p_fatigue = self.service.get_training_plan(date="2026-09-03", equipment=["barbell"])
         self.assertEqual(p_fatigue["plan"]["rule_code"], "TRAIN_RECOVERY_01")
         self.assertNotIn("progression_suggestions", p_fatigue["plan"])
 
         # Case B: Red flag -> triggers SAFETY_RESTRICTED, NO progression
         self.service.update_profile(
-            user_id=user_id,
             safety_flags=["chest_pain"],
             idempotency_key="prof-prio-rf",
         )
-        p_rf = self.service.get_training_plan(user_id=user_id, date="2026-09-04", equipment=["barbell"])
+        p_rf = self.service.get_training_plan(date="2026-09-04", equipment=["barbell"])
         self.assertEqual(p_rf["plan"]["rule_code"], "SAFETY_RESTRICTED")
         self.assertEqual(p_rf["plan"]["prescribed_exercises"], [])
 
         # Case C: Clear red flag with clearance to enter 7-day Deload -> RECOVERY_FLAG_CLEAR_01, NO progression
         self.service.update_profile(
-            user_id=user_id,
             clear_safety_flags=True,
             clearance_reason="Physician exam cleared cardiovascular pathology",
             idempotency_key="prof-prio-clear",
         )
-        p_dl = self.service.get_training_plan(user_id=user_id, date="2026-09-05", equipment=["barbell"])
+        p_dl = self.service.get_training_plan(date="2026-09-05", equipment=["barbell"])
         self.assertEqual(p_dl["plan"]["rule_code"], "RECOVERY_FLAG_CLEAR_01")
         self.assertNotIn("progression_suggestions", p_dl["plan"])
 
     def test_confirmation_workflow_and_revision_chain(self) -> None:
         """Verify confirm_training_progression updates state atomically and links parent_id revision chain."""
-        user_id = "u_confirm_chain"
         # Seed 2 workouts with 80.0kg (sets: 3, reps: 8)
         self.service.complete_workout(
-            user_id=user_id,
             date="2026-09-01",
             idempotency_key="wo-chain-01",
             completed_exercises=[{"name": "Barbell Back Squat", "weight_kg": 80.0, "reps": 8, "sets": 3}],
@@ -284,7 +256,6 @@ class TestCodexReviewRound9(unittest.TestCase):
             completion_rate=1.0,
         )
         self.service.complete_workout(
-            user_id=user_id,
             date="2026-09-02",
             idempotency_key="wo-chain-02",
             completed_exercises=[{"name": "Barbell Back Squat", "weight_kg": 80.0, "reps": 8, "sets": 3}],
@@ -292,12 +263,11 @@ class TestCodexReviewRound9(unittest.TestCase):
             completion_rate=1.0,
         )
 
-        p_prop1 = self.service.get_training_plan(user_id=user_id, date="2026-09-02", equipment=["barbell"])
+        p_prop1 = self.service.get_training_plan(date="2026-09-02", equipment=["barbell"])
         sugg1 = p_prop1["plan"]["progression_suggestions"][0]
 
         # 1. Confirm first progression: 80kg -> 82.5kg
         c1 = self.service.confirm_training_progression(
-            user_id=user_id,
             exercise_name="Barbell Back Squat",
             confirmed_weight_kg=82.5,
             increment_kg=2.5,
@@ -312,13 +282,12 @@ class TestCodexReviewRound9(unittest.TestCase):
         c1_id = c1["data"]["record_id"]
 
         # Next plan immediately uses 82.5kg as the baseline load
-        plan_after_c1 = self.service.get_training_plan(user_id=user_id, date="2026-09-03", equipment=["barbell"])
+        plan_after_c1 = self.service.get_training_plan(date="2026-09-03", equipment=["barbell"])
         squat_after_c1 = next(e for e in plan_after_c1["plan"]["prescribed_exercises"] if e["name"] == "Barbell Back Squat")
         self.assertEqual(squat_after_c1["suggested_weight_kg"], 82.5)
 
         # Complete 2 workouts at 82.5kg to authentically qualify for the next progression
         self.service.complete_workout(
-            user_id=user_id,
             date="2026-09-04",
             idempotency_key="wo-chain-03",
             completed_exercises=[{"name": "Barbell Back Squat", "weight_kg": 82.5, "reps": 8, "sets": 3}],
@@ -326,19 +295,17 @@ class TestCodexReviewRound9(unittest.TestCase):
             completion_rate=1.0,
         )
         self.service.complete_workout(
-            user_id=user_id,
             date="2026-09-05",
             idempotency_key="wo-chain-04",
             completed_exercises=[{"name": "Barbell Back Squat", "weight_kg": 82.5, "reps": 8, "sets": 3}],
             session_rpe=7.0,
             completion_rate=1.0,
         )
-        p_prop2 = self.service.get_training_plan(user_id=user_id, date="2026-09-05", equipment=["barbell"])
+        p_prop2 = self.service.get_training_plan(date="2026-09-05", equipment=["barbell"])
         sugg2 = p_prop2["plan"]["progression_suggestions"][0]
 
         # 2. Later confirm second progression: 82.5kg -> 85.0kg
         c2 = self.service.confirm_training_progression(
-            user_id=user_id,
             exercise_name="Barbell Back Squat",
             confirmed_weight_kg=85.0,
             increment_kg=2.5,
@@ -352,7 +319,7 @@ class TestCodexReviewRound9(unittest.TestCase):
         self.assertEqual(c2["data"]["parent_id"], c1_id)
 
         # Next plan reflects 85.0kg
-        plan_after_c2 = self.service.get_training_plan(user_id=user_id, date="2026-09-06", equipment=["barbell"])
+        plan_after_c2 = self.service.get_training_plan(date="2026-09-06", equipment=["barbell"])
         squat_after_c2 = next(e for e in plan_after_c2["plan"]["prescribed_exercises"] if e["name"] == "Barbell Back Squat")
         self.assertEqual(squat_after_c2["suggested_weight_kg"], 85.0)
 
@@ -364,9 +331,7 @@ class TestCodexReviewRound9(unittest.TestCase):
         """Verify that concurrent knee and lumbar constraints eliminate contraindicated
         exercises across all tiers without contradictory prescriptions.
         """
-        user_id = "u_knee_lumbar"
         self.service.update_profile(
-            user_id=user_id,
             constraints={"injuries": "knee pain with deep flexion, lumbar disc herniation"},
             idempotency_key="prof-kl-01",
         )
@@ -375,7 +340,7 @@ class TestCodexReviewRound9(unittest.TestCase):
         # Back Squat is contraindicated (knee + lumbar).
         # Romanian Deadlift is contraindicated (lumbar).
         # Safe selections: Barbell Hip Thrust (knee/spine friendly) and Glute Bridge.
-        p_bb = self.service.get_training_plan(user_id=user_id, date="2026-09-05", equipment=["barbell"])
+        p_bb = self.service.get_training_plan(date="2026-09-05", equipment=["barbell"])
         bb_names = [e["name"] for e in p_bb["plan"]["prescribed_exercises"]]
         self.assertNotIn("Barbell Back Squat", bb_names)
         self.assertNotIn("Romanian Deadlift", bb_names)
@@ -384,12 +349,11 @@ class TestCodexReviewRound9(unittest.TestCase):
 
         # 2. Dumbbell mode in Recovery tier (with fatigue)
         self.service.log_daily_metrics(
-            user_id=user_id,
             date="2026-09-05",
             metrics={"fatigue_level": 8, "sleep_hours": 5.5},
             idempotency_key="m-kl-fatigue",
         )
-        p_db_rec = self.service.get_training_plan(user_id=user_id, date="2026-09-05", equipment=["dumbbell"])
+        p_db_rec = self.service.get_training_plan(date="2026-09-05", equipment=["dumbbell"])
         db_names = [e["name"] for e in p_db_rec["plan"]["prescribed_exercises"]]
         # Must NOT pick Goblet Squat (knee) or Dumbbell Romanian Deadlift (lumbar)
         self.assertNotIn("Dumbbell Goblet Squat", db_names)
@@ -401,13 +365,11 @@ class TestCodexReviewRound9(unittest.TestCase):
         """Verify that when concurrent constraints eliminate all safe candidates,
         it safely suspends specific resistance movements and provides non-diagnostic guidance.
         """
-        user_id = "u_all_contra"
         self.service.update_profile(
-            user_id=user_id,
             constraints={"injuries": "knee, shoulder, and lumbar severe injuries, avoid all squat, push, and axial loads"},
             idempotency_key="prof-all-c",
         )
-        p_plan = self.service.get_training_plan(user_id=user_id, date="2026-09-05", equipment=["barbell"])
+        p_plan = self.service.get_training_plan(date="2026-09-05", equipment=["barbell"])
         prescribed_names = [e["name"] for e in p_plan["plan"]["prescribed_exercises"]]
         self.assertNotIn("Barbell Back Squat", prescribed_names)
         self.assertNotIn("Barbell Bench Press", prescribed_names)
@@ -419,11 +381,9 @@ class TestCodexReviewRound9(unittest.TestCase):
 
     def test_stale_daily_state_evidence_rejected(self) -> None:
         """Verify that historical daily metrics from 60 days ago are not treated as fresh evidence for today."""
-        user_id = "u_stale_user"
 
         # Log severe sleep deficit on 2026-07-01 (65 days before 2026-09-05)
         self.service.log_daily_metrics(
-            user_id=user_id,
             date="2026-07-01",
             metrics={"sleep_hours": 3.0, "fatigue_level": 9},
             idempotency_key="m-stale-01",
@@ -432,7 +392,7 @@ class TestCodexReviewRound9(unittest.TestCase):
         # Query plan for 2026-09-05:
         # Must NOT treat the 65-day-old sleep deficit as today's fatigue (TRAIN_RECOVERY_01 must NOT trigger)
         # Must NOT treat state as verified_recent_state
-        plan = self.service.get_training_plan(user_id=user_id, date="2026-09-05", evidence_window_days=1)
+        plan = self.service.get_training_plan(date="2026-09-05", evidence_window_days=1)
         p_data = plan["plan"]
 
         self.assertEqual(p_data["rule_code"], "TRAIN_PROGRESSION_STANDARD")
@@ -443,12 +403,11 @@ class TestCodexReviewRound9(unittest.TestCase):
 
         # Now log fresh metrics for 2026-09-05:
         self.service.log_daily_metrics(
-            user_id=user_id,
             date="2026-09-05",
             metrics={"sleep_hours": 8.0, "fatigue_level": 2},
             idempotency_key="m-fresh-01",
         )
-        fresh_plan = self.service.get_training_plan(user_id=user_id, date="2026-09-05", evidence_window_days=1)
+        fresh_plan = self.service.get_training_plan(date="2026-09-05", evidence_window_days=1)
         self.assertEqual(fresh_plan["plan"]["state_evidence"], "verified_recent_state")
         self.assertIsNotNone(fresh_plan["recovery_score"])
 
@@ -458,8 +417,7 @@ class TestCodexReviewRound9(unittest.TestCase):
 
     def test_structured_rest_and_unknown_load_disclosure(self) -> None:
         """Verify prescribed exercises include structured rest duration and do not fabricate unknown loads."""
-        user_id = "u_rest_test"
-        plan = self.service.get_training_plan(user_id=user_id, date="2026-09-05", equipment=["barbell"])
+        plan = self.service.get_training_plan(date="2026-09-05", equipment=["barbell"])
         exercises = plan["plan"]["prescribed_exercises"]
         self.assertTrue(len(exercises) > 0)
 
@@ -476,11 +434,9 @@ class TestCodexReviewRound9(unittest.TestCase):
 
     def test_movement_pattern_substitution(self) -> None:
         """Verify substitute_exercise finds same-movement-pattern alternatives respecting constraints."""
-        user_id = "u_sub_test"
 
         # 1. Substitute Barbell Bench Press (upper_push) with dumbbell equipment
         sub1 = self.service.substitute_exercise(
-            user_id=user_id,
             original_exercise="Barbell Bench Press",
             equipment=["dumbbell"],
         )
@@ -492,7 +448,6 @@ class TestCodexReviewRound9(unittest.TestCase):
 
         # 2. Substitute with shoulder discomfort: Dumbbell Floor Press and Pushup contraindicated
         sub2 = self.service.substitute_exercise(
-            user_id=user_id,
             original_exercise="Barbell Bench Press",
             discomfort_joint="shoulder",
             equipment=["dumbbell"],

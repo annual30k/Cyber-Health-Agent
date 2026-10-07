@@ -34,11 +34,11 @@ class TestP0Contracts(unittest.TestCase):
 
     def test_read_only_purity_never_mutates_database(self) -> None:
         """Reading profile or today on a non-existent user must NOT insert any rows."""
-        profile = self.service.get_profile("u_nonexistent")
+        profile = self.service.get_profile()
         self.assertFalse(profile["exists"])
         self.assertEqual(profile["state_version"], 0)
 
-        today = self.service.get_today("u_nonexistent", "2026-09-04")
+        today = self.service.get_today("2026-09-04")
         self.assertEqual(today["state_version"], 0)
         self.assertEqual(today["nutrition"]["meal_count"], 0)
         self.assertTrue(today["plan_status"]["missing_data"])
@@ -52,11 +52,10 @@ class TestP0Contracts(unittest.TestCase):
         """Simulate 5 independent sessions interacting with the same physical database."""
         # Session 1: Check non-existent profile and record initial breakfast
         s1 = CyberHealthService(self.db_path)
-        p1 = s1.get_profile("u_alice")
+        p1 = s1.get_profile()
         self.assertEqual(p1["state_version"], 0)
 
         res_meal1 = s1.log_meal(
-            user_id="u_alice",
             occurred_at="2026-09-04T08:00:00+08:00",
             meal_type="breakfast",
             foods=[{"name": "oatmeal", "amount_g": {"low": 50, "high": 60}}],
@@ -71,7 +70,7 @@ class TestP0Contracts(unittest.TestCase):
 
         # Session 2: Check today status from fresh instance
         s2 = CyberHealthService(self.db_path)
-        today2 = s2.get_today("u_alice", "2026-09-04")
+        today2 = s2.get_today("2026-09-04")
         self.assertEqual(today2["state_version"], 1)
         self.assertEqual(today2["nutrition"]["meal_count"], 1)
         self.assertEqual(today2["nutrition"]["kcal_low"], 180)
@@ -80,7 +79,6 @@ class TestP0Contracts(unittest.TestCase):
         # Session 3: Add lunch
         s3 = CyberHealthService(self.db_path)
         res_meal2 = s3.log_meal(
-            user_id="u_alice",
             occurred_at="2026-09-04T12:30:00+08:00",
             meal_type="lunch",
             foods=[{"name": "chicken salad"}],
@@ -96,7 +94,6 @@ class TestP0Contracts(unittest.TestCase):
         # Session 4: Revise lunch (user ate less)
         s4 = CyberHealthService(self.db_path)
         res_rev = s4.log_meal(
-            user_id="u_alice",
             occurred_at="2026-09-04T12:30:00+08:00",
             meal_type="lunch",
             foods=[{"name": "half chicken salad"}],
@@ -112,20 +109,19 @@ class TestP0Contracts(unittest.TestCase):
 
         # Session 5: Read audit trail and confirm reconciled daily balance
         s5 = CyberHealthService(self.db_path)
-        final_today = s5.get_today("u_alice", "2026-09-04")
+        final_today = s5.get_today("2026-09-04")
         self.assertEqual(final_today["state_version"], 3)
         # Total active meals = breakfast (180-220) + revised lunch (250-300) = 430-520 kcal
         self.assertEqual(final_today["nutrition"]["meal_count"], 2)
         self.assertEqual(final_today["nutrition"]["kcal_low"], 430)
         self.assertEqual(final_today["nutrition"]["kcal_high"], 520)
 
-        trail = s5.get_audit_trail("u_alice")
+        trail = s5.get_audit_trail()
         self.assertEqual(len(trail), 3)
 
     def test_idempotency_exact_replay_vs_mismatch_error(self) -> None:
         """Exact repeat returns cached operation; different payload with same key raises IDEMPOTENCY_MISMATCH."""
         payload = {
-            "user_id": "u_bob",
             "occurred_at": "2026-09-04T12:00:00+08:00",
             "meal_type": "lunch",
             "foods": [{"name": "beef noodles"}],
@@ -155,15 +151,14 @@ class TestP0Contracts(unittest.TestCase):
 
         # Verify only 1 meal and 1 operation log exist
         with self.service.store.connect() as conn:
-            meals_count = conn.execute("SELECT COUNT(*) AS c FROM meal_log WHERE user_id = 'u_bob'").fetchone()["c"]
-            ops_count = conn.execute("SELECT COUNT(*) AS c FROM operation_log WHERE user_id = 'u_bob'").fetchone()["c"]
+            meals_count = conn.execute("SELECT COUNT(*) AS c FROM meal_log WHERE user_id = 'owner'").fetchone()["c"]
+            ops_count = conn.execute("SELECT COUNT(*) AS c FROM operation_log WHERE user_id = 'owner'").fetchone()["c"]
             self.assertEqual(meals_count, 1)
             self.assertEqual(ops_count, 1)
 
     def test_optimistic_conflict_version_rejected(self) -> None:
         """Providing an outdated expected_state_version raises CONFLICT_VERSION."""
         self.service.log_meal(
-            user_id="u_carol",
             occurred_at="2026-09-04T09:00:00+08:00",
             meal_type="breakfast",
             foods=[],
@@ -174,7 +169,6 @@ class TestP0Contracts(unittest.TestCase):
 
         with self.assertRaises(ConflictError) as caught:
             self.service.log_meal(
-                user_id="u_carol",
                 occurred_at="2026-09-04T13:00:00+08:00",
                 meal_type="lunch",
                 foods=[],
@@ -190,7 +184,6 @@ class TestP0Contracts(unittest.TestCase):
         # User profile timezone defaults to Asia/Shanghai (UTC+8)
         # 2026-09-03T16:30:00Z -> In Shanghai (+8h) this is 2026-09-04T00:30:00+08:00 (i.e. Sept 4)
         self.service.log_meal(
-            user_id="u_dave",
             occurred_at="2026-09-03T16:30:00Z",
             meal_type="late_snack",
             foods=[],
@@ -201,7 +194,6 @@ class TestP0Contracts(unittest.TestCase):
 
         # 2026-09-04T15:30:00Z -> In Shanghai (+8h) this is 2026-09-04T23:30:00+08:00 (i.e. Sept 4)
         self.service.log_meal(
-            user_id="u_dave",
             occurred_at="2026-09-04T15:30:00Z",
             meal_type="late_snack_2",
             foods=[],
@@ -211,12 +203,12 @@ class TestP0Contracts(unittest.TestCase):
         )
 
         # Sept 3 in Shanghai should have 0 meals
-        sept3 = self.service.get_today("u_dave", "2026-09-03")
+        sept3 = self.service.get_today("2026-09-03")
         self.assertEqual(sept3["nutrition"]["meal_count"], 0)
         self.assertTrue(sept3["plan_status"]["missing_data"])
 
         # Sept 4 in Shanghai should aggregate both meals
-        sept4 = self.service.get_today("u_dave", "2026-09-04")
+        sept4 = self.service.get_today("2026-09-04")
         self.assertEqual(sept4["nutrition"]["meal_count"], 2)
         self.assertEqual(sept4["nutrition"]["kcal_low"], 250)
         self.assertEqual(sept4["nutrition"]["kcal_high"], 350)
@@ -226,7 +218,6 @@ class TestP0Contracts(unittest.TestCase):
         """Invalid inputs (e.g. kcal_high < kcal_low) must raise ValidationError."""
         with self.assertRaises(ValidationError):
             self.service.log_meal(
-                user_id="u_eva",
                 occurred_at="2026-09-04T12:00:00+08:00",
                 meal_type="lunch",
                 foods=[],

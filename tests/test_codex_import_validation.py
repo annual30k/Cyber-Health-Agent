@@ -11,10 +11,10 @@ class ImportValidationTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.s = CyberHealthService(Path(self.tmp.name) / "test.sqlite3")
-        self.s.update_profile(user_id="u", idempotency_key="initial")
+        self.s.update_profile(idempotency_key="initial")
 
     def backup(self):
-        data = self.s.export_data(user_id="u")["data"]
+        data = self.s.export_data()["data"]
         # Semantic validation must not depend on an optional checksum.
         data.pop("checksum", None)
         return data
@@ -23,24 +23,24 @@ class ImportValidationTests(unittest.TestCase):
         data = self.backup()
         data["schema_version"] = "0.999.999"
         with self.assertRaises(ValidationError):
-            self.s.import_data(user_id="u", data=data, idempotency_key="bad-schema")
+            self.s.import_data(data=data, idempotency_key="bad-schema")
 
     def test_malformed_profile_json_rejected_atomically(self):
         data = self.backup()
         data["facts"]["profile"]["goals_json"] = "{broken"
-        before = self.s.get_profile("u")
+        before = self.s.get_profile()
         with self.assertRaises(ValidationError):
-            self.s.import_data(user_id="u", data=data, idempotency_key="bad-json")
-        self.assertEqual(self.s.get_profile("u"), before)
+            self.s.import_data(data=data, idempotency_key="bad-json")
+        self.assertEqual(self.s.get_profile(), before)
 
     def test_nonexistent_timezone_rejected(self):
         data = self.backup()
         data["facts"]["profile"]["timezone"] = "Imaginary/Nowhere"
         with self.assertRaises(ValidationError):
-            self.s.import_data(user_id="u", data=data, idempotency_key="bad-zone")
+            self.s.import_data(data=data, idempotency_key="bad-zone")
 
     def test_invalid_safety_mode_rejected(self):
         data = self.backup()
         data["facts"]["profile"]["safety_mode"] = "anything-goes"
         with self.assertRaises(ValidationError):
-            self.s.import_data(user_id="u", data=data, idempotency_key="bad-mode")
+            self.s.import_data(data=data, idempotency_key="bad-mode")

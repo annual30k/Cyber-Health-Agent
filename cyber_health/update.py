@@ -388,7 +388,7 @@ class CyberHealthUpdater:
                 )
             service = CyberHealthService(self.target_db_path, memory_provider=provider)
             # Run read check
-            service.get_today(user_id="probe_check", day="2026-09-09")
+            service.get_today(day="2026-09-09")
             if self.memory_status.connected and service.health_check()["components"]["memory_provider"] != "ok":
                 raise UpdaterError("Configured health-manager Obsidian Memory provider did not respond to ping")
             return True

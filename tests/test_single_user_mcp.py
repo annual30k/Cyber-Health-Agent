@@ -49,17 +49,19 @@ class SingleUserMCPTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT user_id FROM meal_log").fetchone()[0], SINGLE_USER_ID)
 
     def test_legacy_partition_refused_before_service_start(self) -> None:
-        CyberHealthService(self.db).log_meal(
-            user_id="alex",
-            occurred_at="2026-09-18T08:30:00+08:00",
-            meal_type="breakfast",
-            foods=[],
-            kcal_low=80,
-            kcal_high=100,
-            idempotency_key="legacy-breakfast-001",
-        )
+        CyberHealthService(self.db)  # create the schema
+        with closing(sqlite3.connect(self.db)) as conn:
+            conn.execute(
+                """INSERT INTO meal_log(meal_id, user_id, occurred_at, meal_type, foods_json, kcal_low, kcal_high,
+                       status, causation_id, state_version, created_at)
+                   VALUES ('legacy-meal', 'alex', '2026-09-18T08:30:00+08:00', 'breakfast', '[]', 80, 100,
+                       'active', 'op_legacy', 1, '2026-09-18T00:30:00+00:00')"""
+            )
+            conn.commit()
         with self.assertRaisesRegex(RuntimeError, "migrate"):
             create_mcp_server(self.db)
+        with self.assertRaisesRegex(RuntimeError, "migrate"):
+            CyberHealthService(self.db)
         with closing(sqlite3.connect(self.db)) as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM meal_log WHERE user_id='alex'").fetchone()[0], 1)
 

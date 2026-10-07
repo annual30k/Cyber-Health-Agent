@@ -20,10 +20,10 @@ class MemoryEvidenceTests(unittest.TestCase):
                                           memory_provider=EvidenceProvider())
 
     def test_missing_confirmation_is_not_promoted_to_confirmed_wiki(self):
-        result = self.service.query_memory(user_id="u", query="protein", limit=2)
+        result = self.service.query_memory(query="protein", limit=2)
         for item in result["obsidian_memories"]:
             self.assertNotEqual(item["confirmation_status"], "confirmed_wiki")
 
     def test_provider_cannot_exceed_requested_result_limit(self):
-        result = self.service.query_memory(user_id="u", query="protein", limit=2)
+        result = self.service.query_memory(query="protein", limit=2)
         self.assertLessEqual(len(result["obsidian_memories"]), 2)

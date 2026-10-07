@@ -12,7 +12,6 @@ from .catalog import EXERCISE_CATALOG
 @dataclass
 class SafetyRecoveryEvaluation:
     """Canonical assessment of safety restrictions, deload state, and recovery evidence."""
-    user_id: str
     target_date: str
     timezone: str
     safety_mode: str

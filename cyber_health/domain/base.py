@@ -12,8 +12,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..errors import IdempotencyMismatchError
 from ..memory import MemoryProvider, UnavailableMemoryProvider
-from ..store import SQLiteStore
+from ..store import SINGLE_USER_ID, SQLiteStore
 from .catalog import RED_FLAG_KEYWORDS
+
+# Every fact belongs to the one person this installation serves; the column is kept
+# as a fixed storage partition key so older databases stay readable.
+OWNER_ID = SINGLE_USER_ID
 
 # Idempotency keys exist to make retries safe; real retries arrive within minutes.
 # After this window a key that collides with a *different* request is treated as
@@ -48,6 +52,7 @@ class ServiceCore:
         # Injectable wall clock so date-sensitive rules (deload windows, leases, TTL) are testable.
         self._clock: Callable[[], datetime] = clock or (lambda: datetime.now(UTC))
         self.idempotency_replay_window: timedelta = idempotency_replay_window
+        self.store.assert_single_owner()
 
     def _utcnow(self) -> datetime:
         now_dt = self._clock()
@@ -85,22 +90,21 @@ class ServiceCore:
         canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode()).hexdigest()
 
-    def _ensure_profile_in_tx(self, conn: Any, user_id: str, now: str) -> None:
+    def _ensure_profile_in_tx(self, conn: Any, now: str) -> None:
         conn.execute(
             "INSERT OR IGNORE INTO user_profile(user_id, updated_at) VALUES (?, ?)",
-            (user_id, now),
+            (OWNER_ID, now),
         )
 
     @staticmethod
-    def _make_intent_id(user_id: str, idempotency_key: str) -> str:
-        serialized = json.dumps([user_id, idempotency_key], separators=(",", ":"), ensure_ascii=False)
+    def _make_intent_id(idempotency_key: str) -> str:
+        serialized = json.dumps([OWNER_ID, idempotency_key], separators=(",", ":"), ensure_ascii=False)
         digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
         return f"intent_{digest[:32]}"
 
     def _check_idempotency(
         self,
         conn: Any,
-        user_id: str,
         idempotency_key: str,
         action: str,
         payload: dict[str, Any],
@@ -119,7 +123,7 @@ class ServiceCore:
         row = conn.execute(
             """SELECT operation_id, action, request_hash, result_status, after_version, response_json, created_at
                FROM operation_log WHERE user_id = ? AND idempotency_key = ?""",
-            (user_id, idempotency_key),
+            (OWNER_ID, idempotency_key),
         ).fetchone()
         if not row:
             return None
@@ -139,7 +143,7 @@ class ServiceCore:
             return None
         if recompute_when_stale:
             profile = conn.execute(
-                "SELECT state_version FROM user_profile WHERE user_id = ?", (user_id,)
+                "SELECT state_version FROM user_profile WHERE user_id = ?", (OWNER_ID,)
             ).fetchone()
             if profile is not None and profile["state_version"] != row["after_version"]:
                 self._retire_idempotency_key(conn, row["operation_id"], idempotency_key)
@@ -168,7 +172,6 @@ class ServiceCore:
         conn: Any,
         *,
         operation_id: str,
-        user_id: str,
         idempotency_key: str,
         payload: dict[str, Any],
         action: str,
@@ -178,7 +181,7 @@ class ServiceCore:
     ) -> None:
         existing = conn.execute(
             "SELECT operation_id FROM operation_log WHERE user_id = ? AND idempotency_key = ?",
-            (user_id, idempotency_key),
+            (OWNER_ID, idempotency_key),
         ).fetchone()
         if existing:
             conn.execute(
@@ -195,7 +198,7 @@ class ServiceCore:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     operation_id,
-                    user_id,
+                    OWNER_ID,
                     idempotency_key,
                     self._request_hash(payload),
                     action,
