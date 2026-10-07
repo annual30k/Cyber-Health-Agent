@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -390,7 +391,9 @@ class TestUpdateLinksCommand(BaseUpdaterFixture):
         )
 
     def test_successful_update_links_the_command(self) -> None:
-        _target_path(get_venv_bin_dir(self.venv_dir)).write_text("", encoding="utf-8")
+        venv_bin = get_venv_bin_dir(self.venv_dir)
+        venv_bin.mkdir(parents=True, exist_ok=True)
+        _target_path(venv_bin).write_text("", encoding="utf-8")
         updater = CyberHealthUpdater(project_root=self.source_root, target_dir=self.target_dir, dry_run=False)
         with mock.patch.object(CyberHealthUpdater, "_run", return_value=self.report(True)):
             report = updater.run()
@@ -494,6 +497,9 @@ class TestUpdateLifecycleImprovements(BaseUpdaterFixture):
         self.assertNotEqual(report.command_shim.action, "none")
 
     def test_should_hand_off_only_for_a_real_version_change(self) -> None:
+        venv_bin = get_venv_bin_dir(self.venv_dir)
+        venv_bin.mkdir(parents=True, exist_ok=True)
+        (venv_bin / get_executable_name("python")).write_text("", encoding="utf-8")
         updater = self.updater("9.9.9", dry_run=False)
         updater.prepare_core_release()
         self.assertTrue(updater.should_hand_off(True))
@@ -502,7 +508,7 @@ class TestUpdateLifecycleImprovements(BaseUpdaterFixture):
         with mock.patch.dict(os.environ, {"CYBER_HEALTH_NO_HANDOFF": "1"}):
             self.assertFalse(updater.should_hand_off(True))
 
-    @unittest.skipIf(os.name == "nt", "POSIX permission bits")
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits")
     def test_backup_snapshot_is_private(self) -> None:
         status = self.updater(dry_run=False).create_database_snapshot()
         self.assertEqual(os.stat(status.backup_file).st_mode & 0o777, 0o600)

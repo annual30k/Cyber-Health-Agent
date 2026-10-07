@@ -48,8 +48,9 @@ def _target_path(venv_bin_dir: Path) -> Path:
     return venv_bin_dir / (f"{COMMAND_NAME}.exe" if _is_windows() else COMMAND_NAME)
 
 
-def _windows_shim_text(target: Path) -> str:
-    return f'@echo off\r\n{_WINDOWS_MARKER}\r\n"{target}" %*\r\n'
+def _windows_shim_bytes(target: Path) -> bytes:
+    # Bytes, not text: text mode would translate the CRLF line endings on Windows.
+    return f'@echo off\r\n{_WINDOWS_MARKER}\r\n"{target}" %*\r\n'.encode()
 
 
 def _exists(path: Path) -> bool:
@@ -59,7 +60,7 @@ def _exists(path: Path) -> bool:
 def _points_to(shim: Path, target: Path) -> bool:
     if _is_windows():
         try:
-            return shim.is_file() and shim.read_text(encoding="utf-8") == _windows_shim_text(target)
+            return shim.is_file() and shim.read_bytes() == _windows_shim_bytes(target)
         except (OSError, ValueError):
             return False
     return shim.is_symlink() and os.readlink(shim) == str(target)
@@ -76,7 +77,7 @@ def _owned(shim: Path, install_dir: Path) -> bool:
     """A shim is ours only if it is the marked Windows wrapper or a symlink into our install."""
     if _is_windows():
         try:
-            return shim.is_file() and _WINDOWS_MARKER in shim.read_text(encoding="utf-8")
+            return shim.is_file() and _WINDOWS_MARKER.encode() in shim.read_bytes()
         except (OSError, ValueError):
             return False
     if not shim.is_symlink():
@@ -141,7 +142,7 @@ def ensure_command_shim(
         if exists:
             shim.unlink()
         if _is_windows():
-            shim.write_text(_windows_shim_text(target), encoding="utf-8")
+            shim.write_bytes(_windows_shim_bytes(target))
         else:
             shim.symlink_to(target)
     except OSError as exc:

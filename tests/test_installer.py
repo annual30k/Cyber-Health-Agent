@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -618,7 +619,7 @@ class TestCommandOnPath(BaseInstallerFixture):
         self.assertEqual(status.action, "skipped")
         self.assertFalse(self.user_shim().parent.exists())
 
-    @unittest.skipIf(os.name == "nt", "POSIX permission bits")
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits")
     def test_successful_install_makes_the_tree_private(self) -> None:
         installer = self.installer(dry_run=False)
         installer.target_dir.mkdir(parents=True, exist_ok=True)

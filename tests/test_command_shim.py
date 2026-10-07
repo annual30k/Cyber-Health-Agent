@@ -47,7 +47,7 @@ class CommandShimTests(unittest.TestCase):
         self.assertEqual(status.path_hint, "")
         self.assertEqual(command_shim_note(status), "")
         if sys.platform == "win32":
-            self.assertIn(str(self.target), self.shim.read_text(encoding="utf-8"))
+            self.assertIn(str(self.target).encode(), self.shim.read_bytes())
         else:
             self.assertEqual(os.readlink(self.shim), str(self.target))
 
