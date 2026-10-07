@@ -1,19 +1,51 @@
+"""Daily reminder windows, eligibility suppression, lifecycle and read purity."""
+
+from __future__ import annotations
+
+import asyncio
 import json
 import os
 import sys
 import tempfile
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
-from cyber_health.service import CyberHealthService
-from cyber_health.store import SQLiteStore
-from test_support import OWNER
+from cyber_health import CyberHealthService
+from cyber_health.memory import MemoryUnavailable
+from cyber_health.store import SINGLE_USER_ID, SQLiteStore
+from test_support import OWNER, fixed_clock
 
-UTC = UTC
+
+class MockMemoryProvider:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.enabled: bool = True
+
+    def call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.enabled:
+            raise MemoryUnavailable("Obsidian remote adapter offline")
+        self.calls.append((method, payload))
+        return {"status": "ok", "candidate_id": f"cand_{len(self.calls)}"}
 
 
-class TestCodexScheduleSync(unittest.TestCase):
+class FailingMemoryProvider:
+    def call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        raise MemoryUnavailable("Obsidian remote adapter connection timeout")
+
+
+class MockWorkingMemoryProvider:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append((method, payload))
+        return {"status": "ok", "candidate_id": f"cand_{len(self.calls)}"}
+
+
+class ScheduleSyncTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = os.path.join(self.temp_dir.name, "test_schedule.db")
@@ -246,7 +278,6 @@ class TestCodexScheduleSync(unittest.TestCase):
 
     def test_mcp_stdio_schedule_sync_lifecycle(self):
         """End-to-end stdio JSON-RPC test simulating host schedule sync: pull -> postpone -> repull -> cancel -> tombstone."""
-        import asyncio
 
         from mcp.client.session import ClientSession
         from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -332,6 +363,299 @@ class TestCodexScheduleSync(unittest.TestCase):
                     self.assertEqual(wo_event["suppression_reason"], "event_cancelled")
 
         asyncio.run(_run())
+
+
+class ReminderSuppressionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.temp_dir.name, "test_round13.db")
+        self.store = SQLiteStore(self.db_path)
+        self.memory_provider = MockMemoryProvider()
+        self.service = CyberHealthService(self.store, memory_provider=self.memory_provider, clock=fixed_clock())
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_partial_workout_does_not_suppress_schedule_reminder(self):
+        """Partial workout (e.g. completion_rate=0.2) must NOT suppress workout_reminder in get_schedule."""
+        date = "2026-09-05"
+        self.service.schedule_daily_reminders(date=date, idempotency_key="sched-init")
+
+        # Complete a partial workout (completion_rate = 0.2)
+        self.service.complete_workout(
+            date=date,
+            completed_exercises=[{"name": "深蹲", "sets": 1, "reps": 5}],
+            completion_rate=0.2,
+            idempotency_key="wo-partial",
+        )
+
+        events = {e["trigger_condition"]: e for e in self.service.get_schedule(date=date)}
+        self.assertIn("workout_pending", events)
+        self.assertTrue(events["workout_pending"]["eligible"], "Partial workout must not suppress reminder")
+        self.assertIsNone(events["workout_pending"]["suppression_reason"])
+
+    def test_missing_completion_rate_does_not_suppress_schedule_reminder(self):
+        """Workout without explicit completion_rate (None) must NOT suppress workout_reminder."""
+        date = "2026-09-05"
+        self.service.schedule_daily_reminders(date=date, idempotency_key="sched-init")
+
+        self.service.complete_workout(
+            date=date,
+            completed_exercises=[{"name": "慢跑", "duration_min": 10}],
+            completion_rate=None,
+            idempotency_key="wo-nocr",
+        )
+
+        events = {e["trigger_condition"]: e for e in self.service.get_schedule(date=date)}
+        self.assertIn("workout_pending", events)
+        self.assertTrue(events["workout_pending"]["eligible"], "Missing completion_rate must not suppress reminder")
+        self.assertIsNone(events["workout_pending"]["suppression_reason"])
+
+    def test_full_workout_suppresses_schedule_reminder(self):
+        """Full workout (completion_rate >= 1.0) must suppress workout_reminder."""
+        date = "2026-09-05"
+        self.service.schedule_daily_reminders(date=date, idempotency_key="sched-init")
+
+        self.service.complete_workout(
+            date=date,
+            completed_exercises=[{"name": "深蹲", "sets": 4, "reps": 8}],
+            completion_rate=1.0,
+            idempotency_key="wo-full",
+        )
+
+        events = {e["trigger_condition"]: e for e in self.service.get_schedule(date=date)}
+        self.assertIn("workout_pending", events)
+        self.assertFalse(events["workout_pending"]["eligible"])
+        self.assertEqual(events["workout_pending"]["suppression_reason"], "workout_already_completed")
+
+    def test_superseded_plan_commit_ignored_when_latest_draft_exists(self):
+        """When an earlier committed plan is superseded by a subsequent draft, morning_plan reminder is NOT suppressed."""
+        date = "2026-09-05"
+        self.service.schedule_daily_reminders(date=date, idempotency_key="sched-init")
+
+        # 1. Commit plan for today -> morning_plan suppressed
+        self.service.plan_tomorrow(
+            date=date,
+            commit=True,
+            idempotency_key="plan-commit-1",
+        )
+        events = {e["trigger_condition"]: e for e in self.service.get_schedule(date=date)}
+        self.assertFalse(events["morning_plan_not_locked"]["eligible"])
+        self.assertEqual(events["morning_plan_not_locked"]["suppression_reason"], "morning_plan_already_committed")
+
+        # 2. A new revision is generated in draft status, superseding the committed plan
+        self.service.plan_tomorrow(
+            date=date,
+            commit=False,
+            idempotency_key="plan-draft-2",
+        )
+
+        # 3. get_schedule must inspect only non-superseded plan: latest is draft, so reminder is eligible!
+        events = {e["trigger_condition"]: e for e in self.service.get_schedule(date=date)}
+        self.assertTrue(events["morning_plan_not_locked"]["eligible"], "Latest draft plan must keep reminder eligible")
+        self.assertIsNone(events["morning_plan_not_locked"]["suppression_reason"])
+
+    def test_get_schedule_pure_read_snapshot_isolation(self):
+        """get_schedule runs in an isolated read snapshot and executes strictly ZERO mutations."""
+        date = "2026-09-05"
+        self.service.schedule_daily_reminders(date=date, idempotency_key="sched-purity")
+
+        # Snapshot table counts before
+        with self.store.connect() as conn:
+            sched_cnt = conn.execute("SELECT COUNT(*) AS c FROM schedule_event").fetchone()["c"]
+            prof_cnt = conn.execute("SELECT COUNT(*) AS c FROM user_profile").fetchone()["c"]
+            rec_cnt = conn.execute("SELECT COUNT(*) AS c FROM domain_record").fetchone()["c"]
+            op_cnt = conn.execute("SELECT COUNT(*) AS c FROM operation_log").fetchone()["c"]
+            outbox_cnt = conn.execute("SELECT COUNT(*) AS c FROM memory_outbox").fetchone()["c"]
+
+        # Call get_schedule with overdue time window
+        future_now = datetime(2026, 9, 6, 23, 59, tzinfo=UTC)
+        events = self.service.get_schedule(date=date, now=future_now)
+        self.assertTrue(len(events) > 0)
+        self.assertTrue(all(e["status"] == "overdue" for e in events))
+
+        # Snapshot table counts after: strictly ZERO mutations
+        with self.store.connect() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM schedule_event").fetchone()["c"], sched_cnt)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM user_profile").fetchone()["c"], prof_cnt)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM domain_record").fetchone()["c"], rec_cnt)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM operation_log").fetchone()["c"], op_cnt)
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM memory_outbox").fetchone()["c"], outbox_cnt)
+
+
+class ScheduleIdentityAndTimezoneTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.service = CyberHealthService(Path(self.tmp.name) / "test.sqlite3")
+
+    def test_schedule_ids_stable_across_distinct_requests(self):
+        first = self.service.schedule_daily_reminders(date="2026-09-04", idempotency_key="one")
+        second = self.service.schedule_daily_reminders(date="2026-09-04", idempotency_key="two")
+        def ids(r):
+            return {e["event_id"] for e in r["data"]["scheduled_events"]}
+        self.assertEqual(ids(first), ids(second))
+
+    def test_schedule_respects_new_york_timezone(self):
+        self.service.update_profile(timezone="America/New_York", idempotency_key="profile")
+        result = self.service.schedule_daily_reminders(date="2026-09-04", idempotency_key="schedule")
+        event = next(e for e in result["data"]["scheduled_events"] if e["event_type"] == "MORNING_PLAN")
+        dt = datetime.fromisoformat(event["window_start"])
+        self.assertEqual(dt.astimezone(ZoneInfo("America/New_York")).hour, 7)
+
+
+class ScheduleInstantComparisonTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.service = CyberHealthService(Path(self.tmp.name) / "review.sqlite3")
+
+    def meal(self, key, timestamp, kcal=100):
+        return self.service.log_meal(occurred_at=timestamp,
+            meal_type="breakfast", foods=[], kcal_low=kcal, kcal_high=kcal + 10,
+            idempotency_key=key)
+
+    def test_schedule_compares_instants_not_iso_strings(self):
+        with self.service.store.transaction() as conn:
+            conn.execute("""INSERT INTO schedule_event(event_id, user_id, event_type,
+                window_start, window_end, status, created_at, updated_at)
+                VALUES ('e', 'owner', 'DAILY_REVIEW', '2026-09-04T08:00:00+08:00',
+                '2026-09-04T09:00:00+08:00', 'pending', '2026-09-04', '2026-09-04')""")
+        events = self.service.get_schedule(now=datetime(2026, 9, 4, 2, tzinfo=UTC))
+        self.assertEqual(events[0]["status"], "overdue")
+
+
+class OverdueCompensationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temp_dir.name) / "test_advanced.sqlite3"
+        self.service = CyberHealthService(self.db_path)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_schedule_lifecycle_and_overdue_compensation(self) -> None:
+        """Expired schedule events transition to overdue with compensation_required=True."""
+        now = datetime.now(UTC)
+        past_end = (now - timedelta(minutes=15)).isoformat()
+        past_start = (now - timedelta(minutes=45)).isoformat()
+
+        # Seed a schedule event that is already past its window
+        with self.service.store.transaction() as conn:
+            conn.execute(
+                """INSERT INTO schedule_event(
+                    event_id, user_id, event_type, window_start, window_end, status,
+                    revision, delivery_attempts, prompt_hint, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 'pending', 1, 0, 'Late night review', ?, ?)""",
+                ("sched-001", "owner", "DAILY_REVIEW", past_start, past_end, past_start, past_start),
+            )
+
+        # Call get_schedule
+        events = self.service.get_schedule(now=now)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event_id"], "sched-001")
+        self.assertEqual(events[0]["status"], "overdue")
+        self.assertTrue(events[0]["compensation_required"])
+
+        # Acknowledge the overdue event
+        ack = self.service.acknowledge_schedule_event(
+            event_id="sched-001",
+            action="acknowledged",
+            idempotency_key="ack-sched-001",
+        )
+        self.assertEqual(ack["status"], "success")
+
+        # Subsequent get_schedule should return no pending/overdue events
+        events_after = self.service.get_schedule(now=now)
+        self.assertEqual(len(events_after), 0)
+
+
+class ScheduleEventLifecycleTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temp_dir.name) / "test_remaining.sqlite3"
+        self.service = CyberHealthService(self.db_path)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_update_schedule_event_lifecycle(self) -> None:
+        """Verify schedule event delivery, acknowledgement, postponement, and overdue compensation."""
+        date = "2026-09-04"
+
+        # Generate schedule
+        sched_res = self.service.schedule_daily_reminders(
+            date=date,
+            idempotency_key="sched_gen_01",
+        )
+        events = sched_res["data"]["scheduled_events"]
+        self.assertEqual(len(events), 5)
+        target_event = events[0]
+        ev_id = target_event["event_id"]
+
+        # 1. Delivered
+        d_res = self.service.update_schedule_event(
+            event_id=ev_id,
+            action="delivered",
+            idempotency_key="ev_deliv_01",
+        )
+        self.assertEqual(d_res["data"]["status"], "delivered")
+        self.assertEqual(d_res["data"]["delivery_attempts"], 1)
+
+        # 2. Acknowledged
+        a_res = self.service.update_schedule_event(
+            event_id=ev_id,
+            action="acknowledged",
+            idempotency_key="ev_ack_01",
+        )
+        self.assertEqual(a_res["data"]["status"], "acknowledged")
+
+        # 3. Postponed with new window
+        p_res = self.service.update_schedule_event(
+            event_id=ev_id,
+            action="postponed",
+            new_window_start="2026-09-04T09:00:00+08:00",
+            new_window_end="2026-09-04T10:00:00+08:00",
+            idempotency_key="ev_post_01",
+        )
+        self.assertEqual(p_res["data"]["status"], "pending")
+        self.assertGreater(p_res["data"]["revision"], 1)
+
+        # 4. Overdue compensation check
+        with self.service.store.transaction() as conn:
+            conn.execute("UPDATE schedule_event SET status = 'overdue' WHERE event_id = ?", (ev_id,))
+
+        comp_res = self.service.update_schedule_event(
+            event_id=ev_id,
+            action="acknowledged",
+            idempotency_key="ev_comp_01",
+        )
+        self.assertIsNotNone(comp_res["data"]["compensation"])
+        self.assertEqual(comp_res["data"]["compensation"]["status"], "compensated")
+
+
+class ScheduleRollbackTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temp_dir.name) / "cyber-health.sqlite3"
+        self.store = SQLiteStore(self.db_path)
+        self.service = CyberHealthService(self.store)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_get_schedule_rollback_preserves_root_exception(self) -> None:
+        import json
+        user_id = SINGLE_USER_ID
+        self.service.update_profile(
+            goals={"target_kcal_low": 2000, "target_kcal_high": 2500},
+            idempotency_key="setup_profile_goals",
+        )
+        with self.store.connect() as conn:
+            conn.execute("UPDATE user_profile SET goals_json = '{bad-json' WHERE user_id = ?", (user_id,))
+
+        with self.assertRaises(json.JSONDecodeError):
+            self.service.get_schedule(date="2026-09-20")
 
 
 if __name__ == "__main__":

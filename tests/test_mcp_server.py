@@ -1,30 +1,21 @@
-"""Real stdio MCP cross-process client tests for Cyber Health Agent.
-
-Verifies:
-1. Tool discovery over stdio (exactly 7 P0 tools by default, including onboarding writes)
-2. Extended tool discovery with --allow-all flag
-3. End-to-end tool execution over stdio:
-   - cyber_health_get_profile
-   - cyber_health_log_meal
-   - cyber_health_get_today
-   - cyber_health_log_meal idempotency replay
-   - cyber_health_log_meal idempotency mismatch
-   - cyber_health_get_schedule
-   - cyber_health_health_check
-   - cyber_health_get_audit_trail
-"""
+"""stdio MCP server: tool surface, single-owner boundary and error envelopes."""
 
 from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+from cyber_health import CyberHealthService
+from cyber_health_mcp.server import SINGLE_USER_ID, create_mcp_server
 
 
 class TestMCPStdio(unittest.IsolatedAsyncioTestCase):
@@ -300,6 +291,107 @@ class TestMCPStdio(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(qm_data["status"], "success")
                 self.assertIn("sqlite_facts", qm_data)
                 self.assertIn("obsidian_memories", qm_data)
+
+
+class SingleUserMCPTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db = Path(self.temp_dir.name) / "health.sqlite3"
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    @staticmethod
+    def tool(server, name):
+        return next(t for t in server._tool_manager.list_tools() if t.name == name)
+
+    def test_all_tools_hide_user_id(self) -> None:
+        server = create_mcp_server(self.db, allow_all_tools=True)
+        tools = server._tool_manager.list_tools()
+        self.assertEqual(len(tools), 27)
+        for tool in tools:
+            self.assertNotIn("user_id", tool.parameters.get("properties", {}), tool.name)
+
+    def test_two_sessions_share_one_owner(self) -> None:
+        first = create_mcp_server(self.db)
+        result = self.tool(first, "cyber_health_log_meal").fn(
+            occurred_at="2026-09-18T08:30:00+08:00",
+            meal_type="breakfast",
+            foods=[{"name": "soy milk"}],
+            kcal_low=80,
+            kcal_high=100,
+            idempotency_key="breakfast-001",
+        )
+        self.assertEqual(result["status"], "success")
+
+        second = create_mcp_server(self.db)
+        today = self.tool(second, "cyber_health_get_today").fn(date="2026-09-18")
+        self.assertEqual(today["state_version"], 1)
+        self.assertEqual(today["nutrition"]["meal_count"], 1)
+        with closing(sqlite3.connect(self.db)) as conn:
+            self.assertEqual(conn.execute("SELECT user_id FROM meal_log").fetchone()[0], SINGLE_USER_ID)
+
+    def test_legacy_partition_refused_before_service_start(self) -> None:
+        CyberHealthService(self.db)  # create the schema
+        with closing(sqlite3.connect(self.db)) as conn:
+            conn.execute(
+                """INSERT INTO meal_log(meal_id, user_id, occurred_at, meal_type, foods_json, kcal_low, kcal_high,
+                       status, causation_id, state_version, created_at)
+                   VALUES ('legacy-meal', 'alex', '2026-09-18T08:30:00+08:00', 'breakfast', '[]', 80, 100,
+                       'active', 'op_legacy', 1, '2026-09-18T00:30:00+00:00')"""
+            )
+            conn.commit()
+        with self.assertRaisesRegex(RuntimeError, "migrate"):
+            create_mcp_server(self.db)
+        with self.assertRaisesRegex(RuntimeError, "migrate"):
+            CyberHealthService(self.db)
+        with closing(sqlite3.connect(self.db)) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM meal_log WHERE user_id='alex'").fetchone()[0], 1)
+
+
+class ConsoleEntrypointTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.service = CyberHealthService(Path(self.tmp.name) / "test.sqlite3")
+
+    def test_console_entrypoint_is_callable(self):
+        import cyber_health_mcp
+        self.assertTrue(callable(getattr(cyber_health_mcp, "main", None)))
+
+
+class ErrorEnvelopeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temp_dir.name) / "test_remaining.sqlite3"
+        self.service = CyberHealthService(self.db_path)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_mcp_err_envelope_sanitization(self) -> None:
+        """Verify error envelope strips raw input values and does not leak raw sensitive text."""
+        server = create_mcp_server(self.db_path)
+
+        # Access the wrapped function or tool directly
+        log_tool = None
+        for tool in server._tool_manager.list_tools():
+            if tool.name == "cyber_health_log_meal":
+                log_tool = tool.fn
+                break
+        
+        self.assertIsNotNone(log_tool)
+        res = log_tool(
+            occurred_at="2026-09-04T12:00:00+08:00",
+            meal_type="lunch",
+            foods=[{"name": "bread", "amount_g": {"low": 300, "high": 100}}],
+            kcal_low=100,
+            kcal_high=200,
+            idempotency_key="key_err_01",
+        )
+        self.assertEqual(res["status"], "failed")
+        self.assertEqual(res["error"]["code"], "VALIDATION_ERROR")
+        self.assertNotIn("input_value=", res["error"]["message"])
 
 
 if __name__ == "__main__":

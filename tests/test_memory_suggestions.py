@@ -1,4 +1,4 @@
-"""Tests for generic, read-only active-memory pattern discovery."""
+"""Read-only active-memory pattern suggestions."""
 
 from __future__ import annotations
 
@@ -129,3 +129,7 @@ class ActiveMemorySuggestionTests(unittest.TestCase):
         )
         self.assertEqual(result["data"]["daily_proposal_count"], 3)
         self.assertEqual(result["data"]["suggestions"], [])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,4 +1,4 @@
-"""Unit tests for dual-layer memory query, remaining calorie coaching, and local trend aggregation."""
+"""Local trend consolidation, dual-layer recall and provider evidence handling."""
 
 from __future__ import annotations
 
@@ -8,11 +8,11 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from cyber_health import CyberHealthService, ValidationError
+from cyber_health import CyberHealthService
 from test_support import OWNER
 
 
-class MockMemoryProvider:
+class QueryMemoryProvider:
     def __init__(self, items: list[dict[str, Any]] | None = None) -> None:
         self.items = items or []
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -24,7 +24,13 @@ class MockMemoryProvider:
         return {"acknowledged": True}
 
 
-class TestDomainMemoryAndTrends(unittest.TestCase):
+class EvidenceProvider:
+    def call(self, method, payload):
+        return {"items": [{"id": str(i), "content": "unreviewed protein observation"}
+                          for i in range(5)]}
+
+
+class TrendsAndRecallTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = str(Path(self.temp_dir.name) / "test_mem_trends.sqlite3")
@@ -33,50 +39,9 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def test_get_remaining_calories_unconfigured_and_configured(self) -> None:
-        # 1. Unconfigured goals
-        res_unconf = self.service.get_remaining_calories(date="2026-09-04")
-        self.assertEqual(res_unconf["status"], "success")
-        self.assertIsNone(res_unconf["remaining_ranges"])
-        self.assertIn("unconfigured", res_unconf["suggestion"])
-
-        # 2. Configure goals: 2000-2200 kcal, 140-160g protein
-        self.service.update_profile(
-            idempotency_key="up-1",
-            goals={
-                "target_kcal_low": 2000,
-                "target_kcal_high": 2200,
-                "target_protein_low": 140,
-                "target_protein_high": 160,
-            },
-        )
-
-        # 3. Query before meals
-        res_before = self.service.get_remaining_calories(date="2026-09-04")
-        self.assertEqual(res_before["status"], "success")
-        self.assertEqual(res_before["priority_nutrients"], ["protein"])
-        self.assertIn("140-160g protein", res_before["suggestion"])
-
-        # 4. Log high-protein meal
-        self.service.log_meal(
-            occurred_at="2026-09-04T12:00:00+08:00",
-            meal_type="lunch",
-            foods=[{"name": "Chicken breast", "amount_g": {"low": 300, "high": 350}}],
-            kcal_low=700,
-            kcal_high=800,
-            protein_low=150,
-            protein_high=160,
-            idempotency_key="meal-lunch-1",
-        )
-
-        # 5. Protein goal achieved
-        res_after = self.service.get_remaining_calories(date="2026-09-04")
-        self.assertEqual(res_after["priority_nutrients"], ["calories"])
-        self.assertIn("Protein target met", res_after["suggestion"])
-
     def test_query_memory_dual_layer_and_safety_advisory(self) -> None:
         # Setup mock provider with long-term memory
-        mock_prov = MockMemoryProvider([
+        mock_prov = QueryMemoryProvider([
             {
                 "candidate_id": "cand_whey_intolerance",
                 "content": "Whey protein isolate causes mild bloating; plant-based preferred.",
@@ -139,7 +104,7 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
             self.assertIn("aggregated_meals", trend_row["body_json"])
 
     def test_query_memory_unconfirmed_status_and_limit(self) -> None:
-        mock_prov = MockMemoryProvider([
+        mock_prov = QueryMemoryProvider([
             {"id": f"obs_{i}", "content": f"Protein note {i}"}
             for i in range(10)
         ])
@@ -322,120 +287,6 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
             self.assertEqual(b2["total_meals"], 2)
             self.assertEqual(b2["recorded_days"], 2)
 
-    def test_maintain_memory_prunes_foods_json_detail_preserves_macros(self) -> None:
-        """Verify that maintenance safely sets foods_json='[]' while preserving numeric macros and timestamps."""
-        logged = self.service.log_meal(
-            occurred_at="2026-07-12T12:00:00+08:00",
-            meal_type="lunch",
-            foods=[{"name": "Secret Recipe Spicy Stew", "amount_g": {"low": 300, "high": 350}}],
-            kcal_low=650,
-            kcal_high=750,
-            protein_low=35,
-            protein_high=45,
-            idempotency_key="detail-meal-1",
-        )
-        meal_id = logged.get("meal_id") or logged["data"]["meal_id"]
-        # Verify foods_json is populated before maintenance
-        with self.service.store.connect() as conn:
-            m_before = conn.execute("SELECT foods_json FROM meal_log WHERE meal_id = ?", (meal_id,)).fetchone()
-            self.assertIn("Secret Recipe", m_before["foods_json"])
-
-        self.service.maintain_memory(idempotency_key="maint-detail-1", prune_days=30)
-
-        # Verify foods_json is cleared to '[]' but macros remain intact
-        with self.service.store.connect() as conn:
-            m_after = conn.execute(
-                "SELECT foods_json, kcal_low, kcal_high, protein_low, protein_high, status FROM meal_log WHERE meal_id = ?",
-                (meal_id,),
-            ).fetchone()
-            self.assertEqual(m_after["foods_json"], "[]")
-            self.assertEqual(m_after["kcal_low"], 650)
-            self.assertEqual(m_after["kcal_high"], 750)
-            self.assertEqual(m_after["protein_low"], 35)
-            self.assertEqual(m_after["protein_high"], 45)
-            self.assertEqual(m_after["status"], "active")
-
-    def test_memory_action_validation_blocks_unconfirmed_delete_and_invalid_action(self) -> None:
-        """Verify that unknown actions and unconfirmed deletes fail with ValidationError before any DB/IO."""
-        mock_prov = MockMemoryProvider()
-        service = CyberHealthService(self.db_path, memory_provider=mock_prov)
-
-        # 1. Unconfirmed delete must fail immediately
-        with self.assertRaises(ValidationError) as ctx1:
-            service.memory_action(
-                action_type="delete",
-                target_note_path="wiki/Rule.md",
-                confirmed=False,
-                idempotency_key="act-del-unconf",
-            )
-        self.assertIn("explicit confirmation", str(ctx1.exception))
-        self.assertEqual(len(mock_prov.calls), 0)
-
-        # 2. Unknown action must fail immediately
-        with self.assertRaises(ValidationError) as ctx2:
-            service.memory_action(
-                action_type="arbitrary_illegal_op",
-                payload={"something": "bad"},
-                idempotency_key="act-illegal",
-            )
-        self.assertIn("Invalid memory action", str(ctx2.exception))
-        self.assertEqual(len(mock_prov.calls), 0)
-
-        # 3. Confirm without candidate_id must fail immediately
-        with self.assertRaises(ValidationError) as ctx3:
-            service.memory_action(
-                action_type="confirm",
-                confirmed=True,
-                idempotency_key="act-conf-no-id",
-            )
-        self.assertIn("candidate_id", str(ctx3.exception))
-        self.assertEqual(len(mock_prov.calls), 0)
-
-        # Ensure no database records were inserted during failed attempts
-        with service.store.connect() as conn:
-            op_count = conn.execute("SELECT COUNT(*) as c FROM operation_log WHERE user_id = 'owner'").fetchone()["c"]
-            self.assertEqual(op_count, 0)
-            outbox_count = conn.execute("SELECT COUNT(*) as c FROM memory_outbox WHERE user_id = 'owner'").fetchone()["c"]
-            self.assertEqual(outbox_count, 0)
-
-        # 4. Valid confirmed delete succeeds and calls provider
-        res_del = service.memory_action(
-            action_type="delete",
-            target_note_path="wiki/Rule.md",
-            confirmed=True,
-            idempotency_key="act-del-conf",
-        )
-        self.assertEqual(res_del["status"], "success")
-        self.assertEqual(len(mock_prov.calls), 1)
-        self.assertEqual(mock_prov.calls[0][0], "memory.delete")
-
-    def test_memory_action_cannot_smuggle_confirmation_in_payload(self) -> None:
-        mock_prov = MockMemoryProvider()
-        service = CyberHealthService(self.db_path, memory_provider=mock_prov)
-        for action_type, confirmed, payload in (
-            ("action", False, {"candidate_id": "cand-example", "action_type": "confirm"}),
-            ("action", False, {"candidate_id": "cand-example", "action": "delete"}),
-            ("confirm", False, {"candidate_id": "cand-example", "confirmed": True}),
-            ("reject", False, {"candidate_id": "cand-example", "action_type": "confirm"}),
-        ):
-            with self.subTest(action_type=action_type, payload=payload):
-                with self.assertRaises(ValidationError):
-                    service.memory_action(
-                        action_type=action_type,
-                        confirmed=confirmed, payload=payload,
-                        idempotency_key=f"reject-{action_type}-{len(mock_prov.calls)}",
-                    )
-        self.assertEqual(mock_prov.calls, [])
-
-        accepted = service.memory_action(
-            action_type="action", confirmed=True,
-            payload={"candidate_id": "cand-example", "action_type": "confirm"},
-            idempotency_key="confirmed-generic-action",
-        )
-        self.assertEqual(accepted["status"], "success")
-        self.assertEqual(mock_prov.calls[0][0], "memory.action")
-        self.assertIs(mock_prov.calls[0][1]["confirmed"], True)
-
     def test_maintain_memory_supersedes_stale_trend_when_all_meals_deleted(self) -> None:
         """Verify that deleting the last meal in a historical week supersedes the stale trend and preserves lineage."""
         # 1. Log a historical meal in week 2026-W30 (2026-07-20)
@@ -498,57 +349,22 @@ class TestDomainMemoryAndTrends(unittest.TestCase):
         r3 = self.service.maintain_memory(idempotency_key="del-maint-3", prune_days=30)
         self.assertEqual(r3["data"]["consolidated_trends"], 0)
 
-    def test_training_prescription_unified_decision_matrix(self) -> None:
-        """Verify unified decision matrix: constraints, equipment, experience, evidence, and non-diagnostic disclaimers."""
-        # 1. Knee constraint substitution & unrecorded state disclosure
-        self.service.update_profile(
-            constraints={"knee_injury": "patellofemoral pain, avoid deep squat"},
-            idempotency_key="prof-knee-01",
-        )
-        plan_knee = self.service.get_training_plan(date="2026-09-05", equipment=["barbell"])
-        p_data = plan_knee["plan"]
-        self.assertEqual(p_data["rule_code"], "TRAIN_PROGRESSION_STANDARD")
-        self.assertEqual(p_data["state_evidence"], "unrecorded_recent_state")
-        self.assertEqual(p_data["training_experience"], "unconfigured")
-        self.assertEqual(p_data["equipment_mode"], "barbell")
-        # Must not contain ungrounded "状态优良"
-        self.assertNotIn("状态优良", p_data["guidance"])
-        self.assertIn("建议每日录入晨起体征", p_data["guidance"])
-        # Squat contraindicated: Barbell Back Squat replaced with Barbell Hip Thrust
-        ex_names = [e["name"] for e in p_data["prescribed_exercises"]]
-        self.assertNotIn("Barbell Back Squat", ex_names)
-        self.assertIn("Barbell Hip Thrust", ex_names)
-        # Disclaimer present
-        self.assertIn("disclaimer", p_data)
-        self.assertIn("不构成医疗处方", p_data["disclaimer"])
 
-        # 2. Bodyweight-only equipment adaptation
-        plan_bw = self.service.get_training_plan(date="2026-09-05", equipment=["bodyweight"])
-        p_bw_data = plan_bw["plan"]
-        self.assertEqual(p_bw_data["equipment_mode"], "bodyweight")
-        bw_ex_names = [e["name"] for e in p_bw_data["prescribed_exercises"]]
-        for name in bw_ex_names:
-            self.assertNotIn("Barbell", name)
-            self.assertNotIn("Dumbbell", name)
+class MemoryEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.service = CyberHealthService(Path(self.tmp.name) / "test.db",
+                                          memory_provider=EvidenceProvider())
 
-        # 3. Shoulder constraint in Deload mode: Incline Pushup replaced with Bird Dog
-        self.service.update_profile(
-            constraints={"shoulder": "rotator cuff tendinitis, avoid pushup"},
-            safety_flags=["chest_pain"],
-            idempotency_key="prof-shoulder-deload",
-        )
-        # Clear flag with clearance to enter 7-day deload
-        self.service.update_profile(
-            clear_safety_flags=True,
-            clearance_reason="Physician clearance issued",
-            idempotency_key="prof-shoulder-clear",
-        )
-        plan_deload = self.service.get_training_plan(date="2026-09-05")
-        p_dl = plan_deload["plan"]
-        self.assertEqual(p_dl["rule_code"], "RECOVERY_FLAG_CLEAR_01")
-        dl_ex_names = [e["name"] for e in p_dl["prescribed_exercises"]]
-        self.assertNotIn("Incline Pushup", dl_ex_names)
-        self.assertIn("Bird Dog", dl_ex_names)
+    def test_missing_confirmation_is_not_promoted_to_confirmed_wiki(self):
+        result = self.service.query_memory(query="protein", limit=2)
+        for item in result["obsidian_memories"]:
+            self.assertNotEqual(item["confirmation_status"], "confirmed_wiki")
+
+    def test_provider_cannot_exceed_requested_result_limit(self):
+        result = self.service.query_memory(query="protein", limit=2)
+        self.assertLessEqual(len(result["obsidian_memories"]), 2)
 
 
 if __name__ == "__main__":

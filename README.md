@@ -360,43 +360,33 @@ uvx ruff@0.16.10 check .
 
 Date-sensitive tests use the injectable service clock (`CyberHealthService(..., clock=...)`, see `tests/test_support.py`), and installer/updater/uninstaller tests never discover the developer's real Codex or Hermes CLIs.
 
-Current test suite contains **256 automated test cases** (100% passing), including Codex and Hermes host registration, Hermes public-memory Skill adaptation, host-neutral one-Vault memory bootstrap, Obsidian-install preflight, active-memory suggestion, provider bridge, installer, updater, and package-version consistency coverage:
+The suite contains **283 automated test cases**, organized by feature:
 
-### Part A. Codex Review & Independent Verification Suites (89 tests)
-- `tests/test_codex_review.py` (8 tests): Round 1 regressions (mandatory idempotency keys, calendar validation, range checks, repeat resolution).
-- `tests/test_codex_review_round2.py` (7 tests): Round 2 regressions (console entrypoint, outbox isolation, pre-commit intent, red-flag mode, DST offsets).
-- `tests/test_codex_outbox_concurrency.py` (3 tests): Round 3 concurrency state machine (delimiter collisions, pre-reservation, task stealing prevention).
-- `tests/test_codex_review_round4.py` (4 tests): Round 4 regressions (profile safety restoration, full payload hashing, non-stealing lease re-entrancy, unified sleep < 6h).
-- `tests/test_codex_import_safety.py` (2 tests): Round 5 regressions (safety mode protection on import, normalized field conflict detection).
-- `tests/test_codex_import_validation.py` (4 tests): Round 6 regressions (unsupported schema rejection, malformed JSON rollback, invalid timezone/mode).
-- `tests/test_codex_memory_evidence.py` (2 tests): Round 7 regressions (memory status/confidence fidelity, strict limit truncation).
-- `tests/test_codex_unconfigured_plan.py` (2 tests): Round 8 regressions (unconfigured target disclosure, zero default calories rejection).
-- `tests/test_codex_review_round9.py` (9 tests): Round 9 regressions (double progression state machine, combined constraints, stale evidence expiration, movement substitution).
-- `tests/test_codex_review_round10.py` (14 tests): Round 10 regressions (failed session break streak, same-day consolidation, proposal signature verification, baseline load separation).
-- `tests/test_codex_progression_fatigue.py` (8 tests): Round 11 regressions (shared pure safety evaluation, nested metrics extraction, zero-value fidelity, future date filtering).
-- `tests/test_codex_schedule_sync.py` (8 tests): Round 12 regressions (5 standard reminder windows, postponement preservation, tombstone snapshots, pure-read schedule).
-- `tests/test_codex_review_round13.py` (10 tests): Round 13 regressions (partial workout non-suppression, missing completion rate non-suppression, superseded plan filtering, pure-read snapshot isolation, scoped maintenance host drain).
-- `tests/test_codex_review_round14.py` (8 tests): Round 14 regressions (TTL meal detail detection, expired in-flight worker recovery, 51+ task continuation without idempotency block, provider failure backoff, review/rule decoupling, stdio MCP continuation).
+### Domain behavior
+- `tests/test_profile_and_onboarding.py`: grouped first-run intake, automation declaration and plan gating.
+- `tests/test_meals_and_daily_totals.py`: meal validation, revisions, repeat/delete, read-only snapshots, timezone-aware day grouping and intake uncertainty aggregation.
+- `tests/test_idempotency.py`: required keys, exact replay vs `IDEMPOTENCY_MISMATCH`, key reuse after the retry window, stale-review recomputation and `CONFLICT_VERSION`.
+- `tests/test_safety_and_recovery.py`: red flags, restricted mode, deload protocol, sleep/fatigue recovery rules and evidence freshness.
+- `tests/test_workout_logging.py`: wearable screenshot facts and originals across sessions, workout completion.
+- `tests/test_training_plan.py`: prescription decision matrix, combined constraints, structured rest and exercise substitution.
+- `tests/test_training_progression.py`: double progression, streak breakers, confirmation evidence and safety/recovery blocks.
+- `tests/test_schedule.py`: five reminder windows, eligibility suppression, postponement, tombstones, overdue compensation and read purity.
+- `tests/test_daily_review.py`: nightly fact collection, daily review, tomorrow's plan and maintenance hints.
+- `tests/test_import_export.py`: export/import round trip, schema and value validation, safety-profile protection and legacy-owner import.
+- `tests/test_knowledge.py`: evidence citations and non-diagnostic disclosures.
 
-### Part B. Gemini Domain Contract & System Regression Suites (41 tests)
-- `tests/test_p0_contracts.py` (6 tests): P0 contracts (read-only purity, 5-session flow, idempotency hash match vs mismatch, version conflict rejection, timezone-aware day grouping, input validation).
-- `tests/test_domain_advanced.py` (6 tests): Advanced domain logic (meal deletion & repeat, recovery score, red flag lock & deload protocol, review/plan transitions, schedule lifecycle, memory outbox queueing & retry).
-- `tests/test_cross_session.py` (4 tests): Cross-session persistence and optimistic concurrency.
-- `tests/test_mcp_stdio.py` (2 tests): Cross-process stdio MCP client tests verifying tool discovery (7 P0 vs 27 total) and stdio execution without warnings.
-- `tests/test_outbox_concurrency_extended.py` (4 tests): Outbox extensions (concurrent replay, batch chunking at 50, crashed worker lease recovery, physical TTL pruning).
-- `tests/test_domain_remaining.py` (6 tests): Training plan states, workout check-in red flags, knowledge query disclosures, data export/import round-trip, schedule event lifecycle, and MCP error envelope input sanitization.
-- `tests/test_domain_memory_and_trends.py` (13 tests): Dual-layer memory query, remaining calorie guidance, weekly trend aggregation, missing day disclosure, idempotent maintenance, late meal revision chains, detail pruning, and exercise decision matrix.
+### Long-term memory
+- `tests/test_memory_proposals_and_outbox.py`: proposals and memory actions, pre-reserved intents, leases, batch continuation, provider failure backoff and TTL pruning.
+- `tests/test_memory_trends_and_recall.py`: weekly trend consolidation, missing-day disclosure, revision chains and dual-layer recall.
+- `tests/test_memory_suggestions.py`: read-only active-memory pattern suggestions.
+- `tests/test_obsidian_memory_provider.py`: Obsidian provider bridge, inspector scope checks and note parsing.
 
-### Part C. Isolated Host & Uninstallation Safety Suites
-- `tests/test_codex_integration.py` (4 tests): isolated Codex add/get/remove lifecycle, foreign same-name refusal, unrelated-config preservation, and a real CLI round trip under an isolated `CODEX_HOME`.
-- `tests/test_hermes_integration.py` (6 tests): isolated Hermes native add/test/remove lifecycle, disabled-entry repair, foreign same-name refusal, malformed-YAML fail-closed behavior, unrelated-config preservation, and a real CLI round trip under an isolated `HERMES_HOME`.
-- `tests/test_memory_plugin_release.py` (3 tests): stable public Release resolution, mandatory SHA-256 verification, atomic caching, and tamper refusal.
-- `tests/test_core_release.py` (3 tests): Core wheel Release resolution, mandatory SHA-256 verification, cache reuse, and tag/version mismatch refusal.
-- `tests/test_memory_bootstrap.py` (6 tests): explicit Vault bootstrap, Obsidian-install preflight,
-  plugin installation, append-only project registration, other-agent preservation, repeat-run
-  idempotency, different-binding refusal, and dry-run purity.
-- `tests/test_uninstaller.py` (30 tests): Host integration uninstallation contracts (including packaged-CLI OpenClaw auto-detection, exact-state fingerprints and global preflight, fail-closed execution ordering, deterministic dry-run purity, normal data preservation, sanitized reporting without raw environment leakage, refusal of unrelated/foreign OpenClaw registrations, project-root prefix collision rejection, command signature spoofing rejection, double confirmation token for foreign unsets, CLI inspection error fail-closed handling with secret redaction, explicit `--confirm-purge` token requirement, TOCTOU post-plan symlink/inode/host-state swap defenses, refusal of destructive purge when host inspector is missing, fixed LaunchAgent label enforcement, project-local `.trash` symlink rejection, preservation of unknown files in data directory, idempotent repeat execution, non-interference with `obsidian-memory`, Obsidian Vaults, and Codex state, and isolated live OpenClaw sandbox probe).
-- `tests/test_onboarding_flow.py` (5 tests): First-run grouped intake, automation declaration, nightly missing-fact questions, target-gap/workout analysis, detailed tomorrow plan, read purity, and plan gating.
+### MCP server, storage and host integration
+- `tests/test_mcp_server.py`: stdio tool discovery (7 P0 vs 27 total), single-owner boundary, console entrypoint and error envelopes.
+- `tests/test_store_migrations.py` and `tests/test_migrate_owner.py`: versioned schema migrations and legacy-partition migration.
+- `tests/test_codex_registration.py` and `tests/test_hermes_registration.py`: isolated native MCP registration lifecycles, with optional real-CLI round trips.
+- `tests/test_installer.py`, `tests/test_updater.py`, `tests/test_uninstaller.py`, `tests/test_cli.py`: install/update/uninstall contracts, fail-closed ordering, purge safety and TOCTOU defenses.
+- `tests/test_core_release.py`, `tests/test_memory_plugin_release.py`, `tests/test_memory_bootstrap.py`: verified Release resolution and one-Vault memory bootstrap.
 
 ---
 

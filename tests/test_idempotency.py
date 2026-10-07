@@ -1,8 +1,4 @@
-"""Idempotency keys stay retry-safe without punishing hosts that recycle generic labels.
-
-Since v0.4.2 every session and host shares the single ``owner`` key space, so model
-chosen keys such as ``lunch-1`` or ``review-<date>`` collide across days and hosts.
-"""
+"""Idempotent writes, key reuse, replays and optimistic version checks."""
 
 from __future__ import annotations
 
@@ -11,10 +7,17 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from cyber_health import CyberHealthService, IdempotencyMismatchError
+from cyber_health import (
+    ConflictError,
+    CyberHealthService,
+    IdempotencyMismatchError,
+    ValidationError,
+)
 from test_support import FIXED_NOW
 
 USER = "owner"
+
+
 DAY = "2026-09-05"
 
 
@@ -136,6 +139,127 @@ class IdempotencyKeyReuseTests(unittest.TestCase):
             self.service.propose_memory_candidate(
                 method="memory.propose", payload={"text": "b"}, idempotency_key="remember"
             )
+
+
+class ReplayAndConflictTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temp_dir.name) / "test_health.sqlite3"
+        self.service = CyberHealthService(self.db_path)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_idempotency_exact_replay_vs_mismatch_error(self) -> None:
+        """Exact repeat returns cached operation; different payload with same key raises IDEMPOTENCY_MISMATCH."""
+        payload = {
+            "occurred_at": "2026-09-04T12:00:00+08:00",
+            "meal_type": "lunch",
+            "foods": [{"name": "beef noodles"}],
+            "kcal_low": 500,
+            "kcal_high": 650,
+            "protein_low": 25,
+            "protein_high": 35,
+            "idempotency_key": "bob-idemp-001",
+        }
+
+        # First execution
+        first_res = self.service.log_meal(**payload)
+        self.assertEqual(first_res["status"], "success")
+
+        # Exact repeat
+        replay_res = self.service.log_meal(**payload)
+        self.assertEqual(replay_res, first_res)
+
+        # Mismatch: same key, but different calories
+        mismatch_payload = dict(payload)
+        mismatch_payload["kcal_low"] = 700
+        mismatch_payload["kcal_high"] = 900
+
+        with self.assertRaises(IdempotencyMismatchError) as caught:
+            self.service.log_meal(**mismatch_payload)
+        self.assertEqual(caught.exception.code, "IDEMPOTENCY_MISMATCH")
+
+        # Verify only 1 meal and 1 operation log exist
+        with self.service.store.connect() as conn:
+            meals_count = conn.execute("SELECT COUNT(*) AS c FROM meal_log WHERE user_id = 'owner'").fetchone()["c"]
+            ops_count = conn.execute("SELECT COUNT(*) AS c FROM operation_log WHERE user_id = 'owner'").fetchone()["c"]
+            self.assertEqual(meals_count, 1)
+            self.assertEqual(ops_count, 1)
+
+    def test_optimistic_conflict_version_rejected(self) -> None:
+        """Providing an outdated expected_state_version raises CONFLICT_VERSION."""
+        self.service.log_meal(
+            occurred_at="2026-09-04T09:00:00+08:00",
+            meal_type="breakfast",
+            foods=[],
+            kcal_low=200,
+            kcal_high=250,
+            idempotency_key="carol-bk",
+        )
+
+        with self.assertRaises(ConflictError) as caught:
+            self.service.log_meal(
+                occurred_at="2026-09-04T13:00:00+08:00",
+                meal_type="lunch",
+                foods=[],
+                kcal_low=400,
+                kcal_high=500,
+                idempotency_key="carol-lunch",
+                expected_state_version=0,  # Stale, currently 1
+            )
+        self.assertEqual(caught.exception.code, "CONFLICT_VERSION")
+
+
+class CrossSessionReplayTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.database = Path(self.temp_dir.name) / "health.sqlite3"
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_same_idempotency_key_returns_original_operation(self):
+        service = CyberHealthService(self.database)
+        payload = {
+            "occurred_at": "2026-09-03T12:30:00+08:00", "meal_type": "lunch",
+            "foods": [], "kcal_low": 100, "kcal_high": 150, "idempotency_key": "lunch-001",
+        }
+        first = service.log_meal(**payload)
+        repeated = service.log_meal(**payload)
+
+        self.assertEqual(repeated, first)
+        self.assertEqual(len(service.get_audit_trail()), 1)
+
+    def test_stale_state_version_is_rejected(self):
+        service = CyberHealthService(self.database)
+        service.log_meal(
+            occurred_at="2026-09-03T12:30:00+08:00", meal_type="lunch",
+            foods=[], kcal_low=100, kcal_high=150, idempotency_key="lunch-001",
+        )
+
+        with self.assertRaises(ConflictError) as caught:
+            service.log_meal(
+                occurred_at="2026-09-03T13:00:00+08:00", meal_type="snack",
+                foods=[], kcal_low=100, kcal_high=150, idempotency_key="snack-001", expected_state_version=0,
+            )
+        self.assertEqual(caught.exception.code, "CONFLICT_VERSION")
+
+
+class RequiredKeyTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.service = CyberHealthService(Path(self.tmp.name) / "review.sqlite3")
+
+    def meal(self, key, timestamp, kcal=100):
+        return self.service.log_meal(occurred_at=timestamp,
+            meal_type="breakfast", foods=[], kcal_low=kcal, kcal_high=kcal + 10,
+            idempotency_key=key)
+
+    def test_profile_write_requires_idempotency_key(self):
+        with self.assertRaises((ValidationError, TypeError)):
+            self.service.update_profile(goals={"goal": "maintain"})
 
 
 if __name__ == "__main__":
