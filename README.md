@@ -373,6 +373,8 @@ uvx ruff@0.16.10 check .
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
+CI also runs `scripts/upgrade_smoke.py` on Linux, macOS and Windows: the previous published Release installs itself, then upgrades to the current build with its own updater (version hand-off included, new build installed from a wheel). Only the GitHub "latest Release" lookup is pointed at the local wheel; the Release workflow will not publish unless it passes. Run it locally with `uv run python scripts/upgrade_smoke.py` (add `--parent-wheel PATH` to choose the starting version).
+
 Date-sensitive tests use the injectable service clock (`CyberHealthService(..., clock=...)`, see `tests/test_support.py`), and installer/updater/uninstaller tests never discover the developer's real Codex or Hermes CLIs.
 
 The suite contains **283 automated test cases**, organized by feature:
