@@ -211,6 +211,10 @@ def main() -> int:
         return 0
     except SmokeFailure as failure:
         print(f"FAILED: {failure}", file=sys.stderr)
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            # Annotations are readable without access to the job log.
+            text = str(failure)[-4000:].replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+            print(f"::error title=upgrade smoke failed::{text}")
         return 1
     finally:
         if args.keep:
