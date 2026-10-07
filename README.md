@@ -29,7 +29,7 @@
 - **Host-Neutral & Headless**: AI hosts do not own health state. Health records are stored in SQLite facts tables with optimistic concurrency (`state_version`).
 - **Single-Person MCP Boundary (v0.4.2)**: The 27 MCP tools no longer accept `user_id`; all sessions and hosts on one installation use the internal `owner` identity. Existing databases with other identity partitions require an explicit, verified migration before the new server starts. The Core service retains internal user keys for storage and tests; they are not model-selectable MCP arguments.
 - **Strict Read-Only Purity & Consistent Snapshots**: `cyber_health_get_profile` and `cyber_health_get_today` are strictly pure snapshot queries and never insert or mutate database records. `get_today` uses explicit snapshot read transactions (`BEGIN` ... `COMMIT`).
-- **Idempotency & Concurrency**: All state-mutating operations strictly require a non-empty `idempotency_key`. Replays return cached responses; payload mismatches raise `IDEMPOTENCY_MISMATCH`. Stale writes raise `CONFLICT_VERSION`.
+- **Idempotency & Concurrency**: All state-mutating operations strictly require a non-empty `idempotency_key`; hosts should make each key unique per fact (`<tool>-<local date>-<random suffix>`), because all sessions share one key space. Identical retries return the cached response; a different request with a key used in the last 24 hours raises `IDEMPOTENCY_MISMATCH` (nothing is written), while an older key is retired in the audit log and reused. `daily_review` and `plan_tomorrow` replay only while no other write has happened, so a date-stable key never returns a stale review. Stale writes raise `CONFLICT_VERSION`.
 - **Timezone Awareness & Real DST Calculations**: Meal times and daily records are converted to the user's timezone (`Asia/Shanghai` default) using standard IANA `zoneinfo`. Daily reminders calculate true local offsets dynamically (e.g. America/New_York `-04:00` / `-05:00`).
 - **Missing Data Distinction**: Days without entries are explicitly marked `data_status: "unrecorded"` and `missing_data: true`, distinguishing lack of data from fasting or zero intake. Unconfigured calorie/protein targets return `None` with `status: "unconfigured"`.
 - **Cross-Session Screenshot Recall**: `cyber_health_log_workout` persists the user-confirmed structured result of a wearable screenshot (duration, distance, active/total calories, average heart rate, pace, exertion) and can retain its original PNG/JPEG/WebP bytes. The image and its SHA-256 are attached to the same workout fact and included in `export_data`; observed exercise calories are never used to silently increase a food-calorie target.
@@ -44,6 +44,7 @@
   - **Phase 1 Pre-Reservation**: Persists `operation_log` and `memory_outbox` (`in_flight`) in an atomic transaction before any external IO.
   - **Work-Generation Continuation Keys**: Dynamically hashes the current 50-task batch (`intent_id:attempts:status`) into `maint_{user_id}_{day}_g{hash}`, allowing 51+ task queues and retry backoffs to advance without idempotency blockage.
   - **Lineage-Preserving TTL Pruning**: Safely prunes unreferenced superseded records while preserving parent records and immutable audit logs.
+- **Versioned Schema**: SQLite schema changes are ordered, append-only migrations recorded in `PRAGMA user_version`; a database migrated by a newer release is refused rather than opened by older code.
 - **Fact Migration & Integrity**: Full safety profiles, revision chains, and schedules are exported and restored idempotently. Duplicate IDs with conflicting data raise `ConflictError` rather than being silently ignored.
 - **Evidence-Based Knowledge Retrieval**: Only verified primary literature citations (ISSN, AHA) with valid DOIs/URLs are returned; queries without verified matches return `unavailable` without returning irrelevant items.
 
@@ -350,11 +351,14 @@ The packaged console entry point `cyber-health-uninstall` cleanly manages host r
 
 ## Automated Test Suite
 
-Run the full test suite using `unittest`:
+Run the linter and the full test suite (CI runs both):
 
 ```bash
+uvx ruff@0.16.10 check .
 .venv/bin/python -m unittest discover -s tests -v
 ```
+
+Date-sensitive tests use the injectable service clock (`CyberHealthService(..., clock=...)`, see `tests/test_support.py`), and installer/updater/uninstaller tests never discover the developer's real Codex or Hermes CLIs.
 
 Current test suite contains **256 automated test cases** (100% passing), including Codex and Hermes host registration, Hermes public-memory Skill adaptation, host-neutral one-Vault memory bootstrap, Obsidian-install preflight, active-memory suggestion, provider bridge, installer, updater, and package-version consistency coverage:
 
