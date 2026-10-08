@@ -14,6 +14,7 @@ import dataclasses
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import typing
@@ -24,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .automation import automation_status
 from .codex_integration import apply_codex_registration, find_codex_cli, plan_codex_registration
 from .command_shim import USER_BIN_ENV, CommandShimStatus, command_shim_note, command_shim_report_lines, ensure_command_shim
 from .core_release import CoreRelease, CoreReleaseError, CoreReleaseStatus, cache_core_release, resolve_latest_core_release
@@ -656,6 +658,17 @@ class CyberHealthUpdater:
         else:
             report.command_shim = CommandShimStatus(action="skipped", reason="Update did not complete.")
         notes = [self.handoff_note, command_shim_note(report.command_shim)]
+        nightly = None
+        if report.success and not self.dry_run and self.openclaw_bin:
+            # Advisory only: a problem checking the host job must never fail the update.
+            with contextlib.suppress(sqlite3.Error, OSError, RuntimeError, ValueError, KeyError):
+                nightly = automation_status(self.target_dir, self.openclaw_bin, runs=0, env=self.get_openclaw_env())
+            if nightly and nightly.available and not nightly.in_sync:
+                notes.append(
+                    "The nightly review job differs from this release"
+                    + (f" ({'; '.join(nightly.drift)})" if nightly.drift else "")
+                    + "; run `cyber-health automation sync` to apply it"
+                )
         if report.housekeeping.errors:
             notes.append(f"Housekeeping issues: {'; '.join(report.housekeeping.errors)}")
         for note in filter(None, notes):

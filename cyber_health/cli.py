@@ -6,6 +6,7 @@ Usage:
   cyber-health uninstall [--purge-data] [--confirm-purge TOKEN] [--dry-run] [--json]
   cyber-health status [--target-dir DIR] [--json] [--check-updates]
   cyber-health cleanup [--target-dir DIR] [--keep-backups N] [--dry-run] [--json]
+  cyber-health automation status|sync [--target-dir DIR] [--dry-run] [--json]
   cyber-health mcp [--db DB] [--allow-all]
 """
 
@@ -60,6 +61,53 @@ def run_cleanup(target_dir_str: str | None, *, keep_backups: int, dry_run: bool,
         for name in status.backups_pruned:
             print(f"  {'would remove' if dry_run else 'removed'}: {name}")
     return 1 if status.errors else 0
+
+
+def _automation_target(target_dir_str: str | None) -> Path:
+    return Path(target_dir_str) if target_dir_str else Path.home() / DEFAULT_INSTALL_DIR_NAME
+
+
+def run_automation(action: str, target_dir_str: str | None, *, openclaw_bin: str | None, dry_run: bool, as_json: bool) -> int:
+    """Report or reconcile the host nightly-review job against this release's spec."""
+    from .automation import automation_status, find_openclaw, sync_automation, to_dict
+
+    target_dir = _automation_target(target_dir_str)
+    binary = openclaw_bin if openclaw_bin is not None else find_openclaw()
+    if action == "status":
+        status = automation_status(target_dir, binary or None)
+        if as_json:
+            print(json.dumps(to_dict(status), ensure_ascii=False, indent=2))
+        else:
+            print("Cyber Health nightly review automation")
+            print(f"Host         : OpenClaw ({'available' if status.available else 'unavailable'})")
+            print(f"Job          : {status.job_name or 'not found'} {('(' + status.job_id + ')') if status.job_id else ''}")
+            print(f"Schedule     : {status.spec['schedule']['expression']} {status.spec['schedule']['timezone']} "
+                  f"| enabled in spec: {status.spec['enabled']} | job enabled: {status.enabled}")
+            print(f"In sync      : {status.in_sync}")
+            for item in status.drift:
+                print(f"  drift      : {item}")
+            if status.duplicates:
+                print(f"Duplicates   : {', '.join(status.duplicates)}")
+            if status.other_hosts:
+                print(f"Other hosts  : {', '.join(status.other_hosts)}")
+            print(f"Next run     : {status.next_run_at or 'N/A'} | consecutive errors: {status.consecutive_errors}")
+            for run in status.recent_runs:
+                print(f"  run {run['run_at']} {run['status']} -> {run['delivered_to'] or 'not delivered'} "
+                      f"| {run['duration_s']}s | {run['total_tokens']} tokens")
+            print(f"Note         : {status.reason}")
+        return 0 if status.available and status.found and status.in_sync else 1
+
+    result = sync_automation(target_dir, binary or None, dry_run=dry_run)
+    if as_json:
+        print(json.dumps(to_dict(result), ensure_ascii=False, indent=2))
+    else:
+        print(f"Cyber Health automation sync ({'DRY RUN' if dry_run else 'EXECUTE'}): {result.action}")
+        for change in result.changes:
+            print(f"  change     : {change}")
+        if result.backup_file:
+            print(f"  backup     : {result.backup_file}")
+        print(f"  note       : {result.reason or result.status.reason}")
+    return 0 if result.action in ("created", "updated", "unchanged", "planned-create", "planned-update") else 1
 
 
 def run_status(target_dir_str: str | None, as_json: bool = False, check_updates: bool = False) -> int:
@@ -171,6 +219,23 @@ def run_status(target_dir_str: str | None, as_json: bool = False, check_updates:
             "reason": hermes_status.reason,
         }
 
+    if status_data["installed"] and openclaw_bin:
+        from .automation import automation_status
+
+        nightly = automation_status(target_dir, openclaw_bin, runs=1)
+        last = nightly.recent_runs[0] if nightly.recent_runs else {}
+        status_data["nightly_review"] = {
+            "host": "openclaw" if nightly.found else None,
+            "in_sync": nightly.in_sync,
+            "enabled": nightly.enabled,
+            "drift": nightly.drift,
+            "last_run_at": last.get("run_at"),
+            "last_run_status": last.get("status"),
+            "last_delivered_to": last.get("delivered_to"),
+            "consecutive_errors": nightly.consecutive_errors,
+            "note": nightly.reason,
+        }
+
     if check_updates:
         from .update import check_core_update
 
@@ -185,6 +250,10 @@ def run_status(target_dir_str: str | None, as_json: bool = False, check_updates:
         print(f"Installed           : {'YES' if status_data['installed'] else 'NO'}")
         print(f"Target Directory    : {status_data['target_dir']}")
         print(f"Version             : {status_data['version']}")
+        nightly = status_data.get("nightly_review")
+        if nightly:
+            print(f"Nightly Review      : {'in sync' if nightly['in_sync'] else 'NEEDS SYNC'} | last run "
+                  f"{nightly['last_run_at'] or 'never'} {nightly['last_run_status'] or ''} -> {nightly['last_delivered_to'] or 'not delivered'}")
         latest = status_data.get("latest_release")
         if latest:
             if latest["error"]:
@@ -289,6 +358,14 @@ def main(argv: list[str] | None = None) -> int:
     cleanup_parser.add_argument("--dry-run", action="store_true")
     cleanup_parser.add_argument("--json", action="store_true")
 
+    # automation
+    automation_parser = subparsers.add_parser("automation", help="Check or sync the host nightly-review job")
+    automation_parser.add_argument("action", choices=["status", "sync"])
+    automation_parser.add_argument("--target-dir", type=str, default=None)
+    automation_parser.add_argument("--openclaw-bin", type=str, default=None)
+    automation_parser.add_argument("--dry-run", action="store_true")
+    automation_parser.add_argument("--json", action="store_true")
+
     # mcp
     mcp_parser = subparsers.add_parser("mcp", help="Run the Cyber Health stdio MCP server directly")
     mcp_parser.add_argument("--db", dest="db_path", type=str, default=None)
@@ -318,6 +395,8 @@ def main(argv: list[str] | None = None) -> int:
         return uninstall_main(argv[1:])
     elif args.command == "status":
         return run_status(args.target_dir, as_json=args.json, check_updates=args.check_updates)
+    elif args.command == "automation":
+        return run_automation(args.action, args.target_dir, openclaw_bin=args.openclaw_bin, dry_run=args.dry_run, as_json=args.json)
     elif args.command == "cleanup":
         return run_cleanup(args.target_dir, keep_backups=args.keep_backups, dry_run=args.dry_run, as_json=args.json)
     elif args.command == "migrate-owner":

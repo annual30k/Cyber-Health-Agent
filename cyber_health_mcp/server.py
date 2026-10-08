@@ -28,6 +28,7 @@ from cyber_health import (
     CyberHealthError,
     CyberHealthService,
 )
+from cyber_health.automation import render_nightly_message
 from cyber_health.memory import UnavailableMemoryProvider
 from cyber_health.obsidian_memory_provider import ObsidianMemoryProvider
 from cyber_health.store import LEGACY_PARTITION_MESSAGE, SINGLE_USER_ID, LegacyPartitionError, has_foreign_partitions
@@ -1109,9 +1110,8 @@ def create_mcp_server(
     )
     def nightly_review_prompt(date: str | None = None) -> str:
         day = date or _local_today()
-        workflow = service.get_profile()["daily_review_automation"]["workflow"]
-        steps = "\n".join(f"{index}. {step}" for index, step in enumerate(workflow, 1))
-        return f"Run the Cyber Health nightly review for {day} (local date).\n{steps}"
+        declaration_key = service.get_profile()["daily_review_automation"]["declaration_key"]
+        return f"本地日期：{day}\n{render_nightly_message(declaration_key)}"
 
     @mcp.resource(
         "cyber-health://profile",

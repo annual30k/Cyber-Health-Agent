@@ -15,6 +15,10 @@ from cyber_health.cli import main, run_status
 
 class TestCyberHealthCLI(unittest.TestCase):
     def setUp(self) -> None:
+        # Never reach the developer's real OpenClaw; tests that need one patch it explicitly.
+        no_openclaw = mock.patch("cyber_health.cli.shutil.which", return_value=None)
+        no_openclaw.start()
+        self.addCleanup(no_openclaw.stop)
         self.temp_dir = tempfile.TemporaryDirectory(prefix="cyber-health-cli-test-")
         self.test_dir = Path(self.temp_dir.name).resolve()
         self.target_dir = self.test_dir / ".cyber-health"
