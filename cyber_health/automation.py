@@ -44,8 +44,13 @@ REVISION = hashlib.sha256(_MESSAGE_BODY.encode()).hexdigest()[:12]
 
 
 def render_nightly_message(declaration_key: str) -> str:
-    """The job instructions, tagged so drift from this release's text is detectable."""
-    return f"{_MESSAGE_BODY}\n（由 cyber-health 维护：{declaration_key} rev {REVISION}；请用 cyber-health automation sync 修改，不要手改。）"
+    """The job instructions on one line, tagged so drift from this release's text is detectable.
+
+    One line because the text travels as a command-line argument: on Windows ``openclaw`` is a
+    ``.cmd`` shim and cmd.exe cuts arguments at the first newline.
+    """
+    body = " ".join(line.strip() for line in _MESSAGE_BODY.splitlines() if line.strip())
+    return f"{body} （由 cyber-health 维护：{declaration_key} rev {REVISION}；请用 cyber-health automation sync 修改，不要手改。）"
 
 
 def spec_from_database(db_path: Path) -> dict[str, Any]:
