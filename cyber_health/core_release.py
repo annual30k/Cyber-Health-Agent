@@ -11,16 +11,25 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
-from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 CORE_REPOSITORY = "annual30k/cyber-health-agent"
 CORE_RELEASE_API = f"https://api.github.com/repos/{CORE_REPOSITORY}/releases/latest"
+# Web fallback when the API is rate-limited or unreachable; these URLs use no API quota.
+CORE_RELEASES_WEB = f"https://github.com/{CORE_REPOSITORY}/releases"
+CHECKSUM_MANIFEST = "SHA256SUMS"
 WHEEL_NAME = re.compile(r"^cyber_health_agent-([0-9]+(?:\.[0-9]+){1,3}(?:[-+][A-Za-z0-9.-]+)?)-py3-none-any\.whl$")
 SHA256 = re.compile(r"^[a-f0-9]{64}$")
 
 
 class CoreReleaseError(RuntimeError):
     """A Core release is unavailable, malformed, or cannot be verified."""
+
+
+class CoreReleaseFetchError(CoreReleaseError):
+    """GitHub could not be reached or refused the request (network, rate limit, 5xx)."""
 
 
 @dataclass(frozen=True)
@@ -48,17 +57,68 @@ class CoreReleaseStatus:
 FetchBytes = Callable[[str], bytes]
 
 
-def _fetch(url: str) -> bytes:
+def _manifest_sha256(manifest: str, file_name: str) -> str | None:
+    """Look ``file_name`` up in a sha256sum manifest; entries may carry a path such as ``dist/``."""
+    for line in manifest.splitlines():
+        match = re.fullmatch(r"\s*([a-fA-F0-9]{64})\s+\*?(.+?)\s*", line)
+        if match and re.split(r"[\\/]", match.group(2))[-1] == file_name:
+            return match.group(1).lower()
+    return None
+
+
+def _request(url: str) -> Request:
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "cyber-health-agent"}
     token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
-    if token:
+    # Only the API gets the token; downloads redirect to a CDN that must not receive it.
+    if token and urlparse(url).hostname == "api.github.com":
         headers["Authorization"] = f"Bearer {token.strip()}"
-    request = Request(url, headers=headers)
+    return Request(url, headers=headers)
+
+
+def _fetch(url: str) -> bytes:
     try:
-        with urlopen(request, timeout=20) as response:  # nosec B310: fixed GitHub HTTPS endpoint
+        with urlopen(_request(url), timeout=20) as response:  # nosec B310: fixed GitHub HTTPS endpoint
             return response.read()
-    except Exception as exc:  # pragma: no cover - platform-dependent network details
-        raise CoreReleaseError(f"Could not fetch Cyber Health Core Release: {exc}") from exc
+    except Exception as exc:
+        raise CoreReleaseFetchError(f"Could not fetch Cyber Health Core Release: {exc}") from exc
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+
+def _latest_tag_via_web() -> str:
+    """Read the tag that github.com/<repo>/releases/latest redirects to (stable releases only)."""
+    request = Request(f"{CORE_RELEASES_WEB}/latest", method="HEAD", headers={"User-Agent": "cyber-health-agent"})
+    try:
+        with build_opener(_NoRedirect).open(request, timeout=20) as response:
+            location = response.geturl()
+    except HTTPError as exc:
+        if exc.code not in (301, 302, 303, 307, 308):
+            raise CoreReleaseFetchError(f"GitHub releases page returned HTTP {exc.code}") from exc
+        location = exc.headers.get("Location", "")
+    except (URLError, OSError) as exc:
+        raise CoreReleaseFetchError(f"Could not reach the GitHub releases page: {exc}") from exc
+    match = re.search(r"/releases/tag/([^/?#]+)$", location)
+    if not match:
+        raise CoreReleaseError("GitHub did not redirect to a published Core Release.")
+    return match.group(1)
+
+
+def resolve_latest_core_release_via_web(fetch: FetchBytes = _fetch, latest_tag: Callable[[], str] = _latest_tag_via_web) -> CoreRelease:
+    """Resolve the latest stable Release without the API: tag redirect plus the SHA256SUMS asset."""
+    tag = latest_tag()
+    version = tag.removeprefix("v")
+    wheel_name = f"cyber_health_agent-{version}-py3-none-any.whl"
+    match = WHEEL_NAME.fullmatch(wheel_name)
+    if not match or match.group(1) != version:
+        raise CoreReleaseError(f"Latest Core Release tag {tag!r} is not a valid version.")
+    download = f"{CORE_RELEASES_WEB}/download/{tag}"
+    sha256 = _manifest_sha256(fetch(f"{download}/{CHECKSUM_MANIFEST}").decode("utf-8", errors="strict"), wheel_name)
+    if sha256:
+        return CoreRelease(version, wheel_name, f"{download}/{wheel_name}", sha256, f"{CORE_RELEASES_WEB}/tag/{tag}")
+    raise CoreReleaseError(f"{CHECKSUM_MANIFEST} of {tag} has no entry for {wheel_name}; refusing an unverified wheel.")
 
 
 def _checksum(asset: dict[str, Any], assets: list[dict[str, Any]], fetch: FetchBytes) -> str:
@@ -70,16 +130,25 @@ def _checksum(asset: dict[str, Any], assets: list[dict[str, Any]], fetch: FetchB
     manifest = next((item for item in assets if item.get("name") in {"SHA256SUMS", "SHA256SUMS.txt", "checksums.txt"}), None)
     if not isinstance(manifest, dict) or not isinstance(manifest.get("browser_download_url"), str):
         raise CoreReleaseError("Latest Core Release needs a GitHub SHA-256 digest or SHA256SUMS asset.")
-    for line in fetch(manifest["browser_download_url"]).decode("utf-8", errors="strict").splitlines():
-        match = re.fullmatch(r"\s*([a-fA-F0-9]{64})\s+\*?(.+?)\s*", line)
-        if match and match.group(2) == asset["name"]:
-            return match.group(1).lower()
+    found = _manifest_sha256(fetch(manifest["browser_download_url"]).decode("utf-8", errors="strict"), asset["name"])
+    if found:
+        return found
     raise CoreReleaseError(f"Checksum manifest has no entry for {asset['name']}.")
 
 
-def resolve_latest_core_release(fetch: FetchBytes = _fetch) -> CoreRelease:
+def resolve_latest_core_release(
+    fetch: FetchBytes = _fetch, latest_tag: Callable[[], str] = _latest_tag_via_web
+) -> CoreRelease:
     try:
-        payload = json.loads(fetch(CORE_RELEASE_API).decode("utf-8"))
+        raw = fetch(CORE_RELEASE_API)
+    except CoreReleaseFetchError as api_error:
+        # Rate limit or outage: fall back to the web endpoints (same SHA-256 requirement).
+        try:
+            return resolve_latest_core_release_via_web(fetch, latest_tag)
+        except CoreReleaseError as web_error:
+            raise CoreReleaseError(f"{api_error}; web fallback also failed: {web_error}") from web_error
+    try:
+        payload = json.loads(raw.decode("utf-8"))
     except CoreReleaseError:
         raise
     except Exception as exc:
